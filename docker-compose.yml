@@ -3,8 +3,8 @@ services:
     build:
       context: ./
 
-    container_name: nmos-crosspoint_v5
-    hostname: nmos-crosspoint_v5
+    container_name: nmos-crosspoint_v3
+    hostname: nmos-crosspoint_v3
     domainname: local
 
     network_mode: host
