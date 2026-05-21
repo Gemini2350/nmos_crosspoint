@@ -11,7 +11,7 @@ Tested with a wide range of devices — Lawo, Riedel, Embrionix, AJA, Imagine, S
 
 ## What it does
 - **Autodiscover.** Finds Senders and Receivers according to NMOS IS-04
-- **Crosspoint matrix.** Click a sender and a receiver to connect them according to NMOS-IS-05. Optional Autotake or "stage and then TAKE" workflow.
+- **Crosspoint matrix.** Click a sender and a receiver to connect them according to NMOS IS-05. Autotake or "stage and then TAKE" workflow.
 - **Multicast DHCP.** Hands out and tracks multicast addresses automatically from a pool you define. No more spreadsheets.
 - **Manual multicast editing.** Each sender's leg can be overridden with a custom address on the Details page; clearing the field falls back to the DHCP-reserved one. Duplicate-multicast detection runs across every active sender on the network. The offending leg is flagged in the UI so you can spot the conflict immediately.
 
