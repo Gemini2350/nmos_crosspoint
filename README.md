@@ -1,6 +1,6 @@
 # NMOS Crosspoint
 
-NMOS Crosspoint is a web-based control panel for **NMOS** and **ST 2110** media networks. It shows every device on your network, lets you route senders to receivers like a classic crosspoint, takes care of multicast addresses for you, and keeps things tidy with little touches like vendor-specific Web-UI links, DNS hostname registration and PTP health hints.
+NMOS Crosspoint is a web-based control panel for **NMOS** **ST 2110 / AES67** media networks. It shows every device on your network, lets you route senders to receivers like a classic crosspoint, takes care of multicast addresses for you, and keeps things tidy with little touches like vendor-specific Web-UI links, DNS hostname registration and PTP health hints.
 
 ![Crosspoint matrix](Screenshots/Screenshot%202026-05-22%20at%2000.58.10.png)
 
@@ -10,14 +10,15 @@ Tested with a wide range of devices — Lawo, Riedel, Embrionix, AJA, Imagine, S
 
 
 ## What it does
-
-- **Crosspoint matrix.** Click a sender and a receiver to connect them. Optional Autotake or "stage and then TAKE" workflow.
+- **Autodiscover.** Finds Senders and Receivers according to NMOS IS-04
+- **Crosspoint matrix.** Click a sender and a receiver to connect them according to NMOS-IS-05. Optional Autotake or "stage and then TAKE" workflow.
 - **Multicast DHCP.** Hands out and tracks multicast addresses automatically from a pool you define. No more spreadsheets.
-- **Live device overview.** Every node, device, sender and receiver from the NMOS registry, in real time. Status dots show whether a device is online and locked to your house PTP.
+- **Manual multicast editing.** Each sender's leg can be overridden with a custom address on the Details page; clearing the field falls back to the DHCP-reserved one. Duplicate-multicast detection runs across every active sender on the network. The offending leg is flagged in the UI so you can spot the conflict immediately.
+- **Live device overview.** Every node, device, sender and receiver from the NMOS registry, in real time updated via Websocket Connection from the Registry. Status dots show whether a device is online and locked to your house PTP. 
 - **Forget and Hide.** Remove offline devices or individual offline senders / receivers; hide flows you don't want to see in the matrix without losing the device.
-- **Vendor Web-UI links.** One click opens the device's own configuration page in a new tab — the URL is built from a vendor recipe so it works the same across Matrox, Embrionix, Merging, QSC, Sony and the rest.
-- **DNS hostname push.** Each device's name lands as a `host_override` on your pfSense DNS resolver, so `Camera1.simplexity.training` resolves automatically.
-- **Aliases.** Rename a device or a single flow to whatever your operators call it; the original NMOS label is still visible as a tooltip.
+- **Vendor Web-UI links.** One click opens the device's own configuration page in a new tab: The URL is built from a vendor recipe so it works the same across Matrox, Merging, QSC, Sony and the rest.
+- **DNS hostname push.** Each device's name lands as a `host_override` on your pfSense DNS resolver, so `Camera1.simplexity.training` resolves automatically. No more IP's
+- **Aliases.** Rename a device or a single flow to whatever your operators call it; the original NMOS label is still visible as a tooltip. NMOS IS-13 is planned to store the Aliases back to the Device
 - **PTP health.** Tell Crosspoint which Grand-Master ID is the "correct" one and every device shows a green / yellow / red dot at a glance.
 - **Search and filter.** Find a device or flow by name, format, codec or IP.
 
@@ -32,7 +33,7 @@ The top of the Setup page. Tell Crosspoint which NMOS registry to talk to (chang
 ![Setup top: registry, GMID, auto-reconnect](Screenshots/Screenshot%202026-05-22%20at%2000.55.42.png)
 
 **Crosspoint: Auto-Activate Sender + Multicast DHCP**
-Auto-Activate Sender, off by default, automatically switches on an inactive sender when you patch a receiver to it. Multicast DHCP is the main switch for the address pool — when enabled, every active sender gets a reserved pair of addresses (odd / odd+1 so ST 2022-7 works) drawn from a single CIDR range you define (default `239.30.0.0/16`). When you flip it on for the first time you're asked whether to **Keep current IPs** (no streams touched) or **Renew from Pool** (everything gets a fresh address).
+Auto-Activate Sender, off by default, automatically switches on an inactive sender when you patch a receiver to it. Multicast DHCP is the main switch for the address pool — when enabled, every active sender gets a reserved pair of addresses (odd / odd+1 so ST 2022-7 works) drawn from a single CIDR range you define (default `239.30.0.0/16`). The allocator checks both its own pool and every live `destination_ip` on the network before handing out a new pair, so duplicates can't slip through. Manual overrides on the Details page are honoured; clearing the field reverts the leg to its reserved address. When you flip Multicast DHCP on for the first time you're asked whether to **Keep current IPs** (no streams touched) or **Renew from Pool** (everything gets a fresh address).
 
 ![Setup: auto-activate + multicast DHCP](Screenshots/Screenshot%202026-05-22%20at%2000.55.51.png)
 
@@ -60,7 +61,7 @@ Update your admin user and password. You can only edit your own account and you 
 ## Day-to-day usage
 
 - **Connect** — open Crosspoint, click a sender, click a receiver, done. With Autotake off you collect changes first and press TAKE to apply them all at once.
-- **Inspect a device** — Details page shows every flow, the live legs (IPs and ports), the SDP-derived format and bitrate, and lets you edit the alias or the multicast IP per leg.
+- **Inspect a device** — Details page shows every flow, the live legs (IPs and ports), the SDP-derived format and bitrate, and lets you edit the alias or the multicast IP per leg. Duplicate multicasts are highlighted across the whole list so you can find clashing senders at a glance.
 - **Replace a device** — Forget the old one (releases its multicast leases, removes its DNS entry). Plug the new one in. It'll show up automatically.
 - **Spot a problem** — the right-hand nav has a live Dev / TX / RX counter that goes yellow / red when something becomes unreachable, visible from every page.
 
