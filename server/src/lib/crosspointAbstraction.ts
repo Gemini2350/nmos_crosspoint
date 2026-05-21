@@ -117,7 +117,13 @@ const md5 = data => crypto.createHash('md5').update(data).digest("hex")
                 // 2) Then rewrite each leg's multicast field to the effective
                 //    address so the actual PATCH always carries a destination.
                 try{
-                    if(MulticastLeaseManager.instance && Array.isArray(data?.legs)){
+                    // Only touch the Multicast Lease Manager when DHCP is ON.
+                    // With DHCP off the user's typed IP must pass straight
+                    // through to the device — substituting a reserved pool
+                    // address would be a silent rewrite the user never asked
+                    // for. Stale leases from a previous on-period stay in
+                    // memory for inspection but no longer influence PATCHes.
+                    if(MulticastLeaseManager.instance && MulticastLeaseManager.instance.isEnabled() && Array.isArray(data?.legs)){
                         let mgr = MulticastLeaseManager.instance;
                         data.legs.forEach((l:any) => {
                             if(typeof l.index !== "number") return;
@@ -132,8 +138,6 @@ const md5 = data => crypto.createHash('md5').update(data).digest("hex")
 
                             // Substitute leg.multicast with the now-effective IP
                             // so setFlowMulticast always has something to patch.
-                            // If no lease exists (auto-allocation disabled), we
-                            // leave the user's value untouched.
                             const eff = mgr.getEffectiveIp(nmosId, l.index);
                             if(eff){
                                 l.multicast = eff;

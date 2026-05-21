@@ -17,7 +17,6 @@
   import Logging from './routes/logging.svelte';
 
   import Debug from './routes/debug.svelte';
-  import Riedelembrionix from './routes/mediadevices/riedelembrionix.svelte';
     import OverlayMenu from "./lib/OverlayMenu/OverlayMenu.svelte";
     import ServerConnectorOverlay from "./lib/ServerConnector/ServerConnectorOverlay.svelte";
     import type { Subject } from "rxjs";
@@ -234,9 +233,6 @@
 
 
     function checkCurrentUrl(url:string, route:string){
-      if(route.startsWith("/mediadevices") && current_url.startsWith("/mediadevices")){
-        return true;
-      }
       return url == route
     }
 
@@ -255,8 +251,6 @@
 
     <Route path="/debug" component={Debug}/>
     <Route path="/logging" component={Logging}/>
-
-    <Route path="/mediadevices/riedelembrionix" component={Riedelembrionix}/>
 
     <Route path="/setup" component={Setup}/>
 

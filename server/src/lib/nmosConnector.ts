@@ -567,7 +567,21 @@ export class NmosRegistryConnector {
                                 let sdp = sdpTransform.parse(response.data);
                                 sdp["_RAWSDP"] = response.data;
                                 if(sdp.media.length == 0){
-                                    SyncLog.log("warn", "NMOS", "Got BAD SDP File for Flow: " + label + " ( ID: " + senderId +" )")  
+                                    // Some devices (e.g. Merging Anubis) reply with
+                                    // a session-only SDP — header lines but no `m=`
+                                    // media section — while the sender is inactive.
+                                    // That's expected, not a bug. Only flag the
+                                    // warning when the sender is actually active.
+                                    let inactive = false;
+                                    try{
+                                        let s:any = this.nmosState.senders?.[senderId];
+                                        if(s && s.subscription){
+                                            inactive = !s.subscription.active;
+                                        }
+                                    }catch(e){}
+                                    if(!inactive){
+                                        SyncLog.log("warn", "NMOS", "Got BAD SDP File for Flow: " + label + " ( ID: " + senderId +" )")
+                                    }
                                     try{
                                         // TODO Test
                                         delete this.nmosState["sendersManifestDetail"][senderId];
@@ -584,7 +598,18 @@ export class NmosRegistryConnector {
                                     this.updateCrosspoint();
                                 }
                             }else{
-                                SyncLog.log("warn", "NMOS", "Got BAD SDP File for Flow: " + label + " ( ID: " + senderId +" )")    
+                                // Same suppression as above: inactive senders
+                                // legitimately return tiny / empty manifests.
+                                let inactive = false;
+                                try{
+                                    let s:any = this.nmosState.senders?.[senderId];
+                                    if(s && s.subscription){
+                                        inactive = !s.subscription.active;
+                                    }
+                                }catch(e){}
+                                if(!inactive){
+                                    SyncLog.log("warn", "NMOS", "Got BAD SDP File for Flow: " + label + " ( ID: " + senderId +" )")
+                                }
                                 try{
                                     // TODO Test
                                     delete this.nmosState["sendersManifestDetail"][senderId];
@@ -627,16 +652,28 @@ export class NmosRegistryConnector {
                         sender = g.post;
                         device = this.nmosState.devices[sender.device_id];
 
-                        device.controls.forEach((c)=>{
-                            if(c.type == "urn:x-nmos:control:sr-ctrl/v1.0" ){
-                                let href = c.href;
-                                if(href[href.length-1] != "/"){
-                                    href += "/";
+                        // Accept BOTH supported IS-05 control versions.
+                        // Devices that advertise v1.1 only (e.g. QSC Core)
+                        // previously slipped through this filter, which left
+                        // their senderActiveData empty — and the Multicast
+                        // Lease Manager could never reconcile the address.
+                        // Order matters: v1.1 first, so newer devices that
+                        // advertise both don't get stuck on the older URL
+                        // (which may exist for compatibility but lack fields).
+                        let preferred = ["urn:x-nmos:control:sr-ctrl/v1.1", "urn:x-nmos:control:sr-ctrl/v1.0"];
+                        for(let ctrlType of preferred){
+                            device.controls.forEach((c:any)=>{
+                                if(c.type === ctrlType){
+                                    let href = c.href;
+                                    if(href[href.length-1] !== "/"){
+                                        href += "/";
+                                    }
+                                    href += "single/senders/"+senderId+"/active/";
+                                    active_href.push(href);
                                 }
-                                href += "single/senders/"+senderId+"/active/";
-                                active_href.push(href)
-                            }
-                        });
+                            });
+                            if(active_href.length > 0) break;
+                        }
                         
                         
                     }catch(e){}
@@ -779,19 +816,55 @@ export class NmosRegistryConnector {
     }
 
     /**
-     * Walk every known NMOS sender and run the lease reconcile. Used as a
-     * one-off "force-allocate from pool" pass when Auto-Allocation is turned
-     * on and the user wants a fresh start. Always forces receivers to
-     * reconnect — otherwise they'd silently stay on the old IPs and the
-     * fresh allocation would only confuse the network.
+     * "Renew from Pool" — force every active sender onto a fresh address.
+     *
+     * The naive version (just calling reconcileSenderWithLease for every id)
+     * was buggy: senders that already had a lease never got re-allocated,
+     * since ensureLease() returns the existing lease when one is present.
+     * The fix is to RELEASE every active sender's lease first so the
+     * allocator pool is full again, then reconcile each one — that path
+     * allocates fresh and PATCHes the device.
+     *
+     * To avoid hammering devices with simultaneous IS-05 PATCHes when there
+     * are many senders, the reconciles are spaced ~30ms apart.
      */
     public sweepAllSenders(){
         try{
+            let manager = MulticastLeaseManager.instance;
+            if(!manager) return;
+
+            // Collect ids in two buckets — active senders get a re-allocation,
+            // inactive ones keep waiting (they'll be reconciled the moment
+            // their subscription.active flips true via the IS-04 WS event).
+            let activeIds: string[] = [];
             for(let senderId in this.nmosState.senders){
-                try{
-                    this.reconcileSenderWithLease(senderId, true);
-                }catch(e){}
+                let sender = this.nmosState.senders[senderId];
+                if(!sender) continue;
+                if(sender.subscription && sender.subscription.active){
+                    activeIds.push(senderId);
+                }
             }
+
+            // Step 1 — return every active sender's pair to the pool.
+            if(activeIds.length > 0){
+                manager.releaseLeases(activeIds);
+                SyncLog.log("info", "Multicast Lease", "Renew from Pool: released " + activeIds.length + " active sender lease(s).");
+            }
+
+            // Step 2 — reconcile each one with a small delay between PATCHes.
+            // 30ms × N still gives sub-second total for typical (≤30 senders)
+            // deployments while preventing simultaneous-PATCH timeouts on
+            // devices that throttle their IS-05 endpoint.
+            const DELAY_MS = 30;
+            activeIds.forEach((senderId, idx) => {
+                setTimeout(()=>{
+                    try{
+                        this.reconcileSenderWithLease(senderId, true);
+                    }catch(e:any){
+                        SyncLog.log("warn", "Multicast Lease", "Renew failed for " + senderId + ": " + e.message);
+                    }
+                }, idx * DELAY_MS);
+            });
         }catch(e){}
     }
 
@@ -1404,8 +1477,29 @@ export class NmosRegistryConnector {
                 transportParams.push({});
             }
 
+            // Preserve the sender's current master_enable across the PATCH.
+            // Per IS-05 a missing field means "leave unchanged", but some
+            // firmwares (notably Merging Anubis) misread the omission and
+            // deactivate the sender when only transport_params change. By
+            // echoing back whatever subscription.active is right now we
+            // make the behaviour deterministic across vendors.
+            let currentMasterEnable = false;
+            try{
+                let s:any = this.nmosState.senders?.[senderId];
+                if(s && s.subscription){
+                    currentMasterEnable = !!s.subscription.active;
+                }
+                // Also consult the cached IS-05 active snapshot — its
+                // master_enable is authoritative when present.
+                let active:any = (this.nmosState as any).senderActiveData?.[senderId];
+                if(active && typeof active.master_enable === "boolean"){
+                    currentMasterEnable = active.master_enable;
+                }
+            }catch(e){}
+
             let patch:any = {
                 "receiver_id": null,
+                "master_enable": currentMasterEnable,
                 "activation": {
                     "mode": "activate_immediate",
                     "requested_time": null,
@@ -1523,9 +1617,56 @@ export class NmosRegistryConnector {
      * resulting PATCH triggers receiver reconnects regardless of the
      * `reconnectReceiversOnSenderChange` setting.
      */
+    /**
+     * Force-refresh the IS-05 `single/senders/<id>/active` snapshot of one
+     * sender. Used when the lease manager has a fresh lease for a sender
+     * but the cached `senderActiveData` is missing or stale — without this
+     * we'd silently wait for the next NMOS WS event to arrive, which may
+     * never happen for senders that haven't changed any IS-04 field.
+     *
+     * Returns true if the active data was successfully updated.
+     */
+    private async refreshSenderActive(senderId:string): Promise<boolean> {
+        try{
+            let sender = this.nmosState.senders[senderId];
+            if(!sender){ return false; }
+            let device = this.nmosState.devices[sender.device_id];
+            if(!device || !Array.isArray(device.controls)){ return false; }
+            // Accept both supported IS-05 control versions — QSC and other
+            // newer devices advertise v1.1 only. v1.1 wins when both are
+            // present (newer schema, better field coverage).
+            let preferred = ["urn:x-nmos:control:sr-ctrl/v1.1", "urn:x-nmos:control:sr-ctrl/v1.0"];
+            for(let ctrlType of preferred){
+                for(let c of device.controls){
+                    if(c && c.type === ctrlType){
+                        let href:string = c.href;
+                        if(href[href.length-1] !== "/"){ href += "/"; }
+                        href += "single/senders/" + senderId + "/active/";
+                        try{
+                            let response = await axios.get(href);
+                            this.nmosState.senderActiveData[senderId] = response.data;
+                            return true;
+                        }catch(e:any){
+                            SyncLog.log("warn", "Multicast Lease", "refreshSenderActive failed for " + senderId + " via " + ctrlType + ": " + (e?.message || e));
+                            // Don't return — try the other version before giving up
+                        }
+                    }
+                }
+            }
+        }catch(e){}
+        return false;
+    }
+
     private reconcileSenderWithLease(senderId:string, forceReconnect:boolean = false){
         let manager = MulticastLeaseManager.instance;
         if(!manager){ return; }
+
+        // Hard guard: when Multicast DHCP is OFF the server must NEVER touch
+        // any sender's multicast addresses, even for senders that still have
+        // a lease in memory from a previous on-period. ensureLease() returns
+        // existing leases regardless of the enabled flag (so the inventory
+        // and stats stay readable), so we need this explicit check here.
+        if(!manager.isEnabled()){ return; }
 
         let sender = this.nmosState.senders[senderId];
         if(!sender){ return; }
@@ -1561,12 +1702,30 @@ export class NmosRegistryConnector {
         }catch(e){}
 
         let isActive = !!(sender.subscription && sender.subscription.active);
+        let hadLeaseBefore = !!manager.getLease(senderId);
         let lease = manager.ensureLease({ senderId, mediaType, channels, deviceLabel, nodeId, port, isActive });
         if(!lease){ return; }
 
         // Compare lease against current active transport_params
         let active:any = (this.nmosState as any).senderActiveData?.[senderId];
-        if(!active || !Array.isArray(active.transport_params)){ return; }
+        if(!active || !Array.isArray(active.transport_params)){
+            // We have a (possibly fresh) lease but no IS-05 active snapshot
+            // yet — common when a sender just transitioned to active and we
+            // got the IS-04 event before the IS-05 GET landed, OR when an
+            // earlier IS-05 fetch failed silently. Trigger a fresh fetch and
+            // recurse so the PATCH actually goes out instead of getting
+            // stuck waiting for the next external trigger.
+            if(!hadLeaseBefore || forceReconnect){
+                try{
+                    this.refreshSenderActive(senderId).then((ok:boolean)=>{
+                        if(ok){
+                            try{ this.reconcileSenderWithLease(senderId, forceReconnect); }catch(e){}
+                        }
+                    }).catch(()=>{});
+                }catch(e){}
+            }
+            return;
+        }
 
         let legs:any[] = [];
         active.transport_params.forEach((tp:any, idx:number)=>{

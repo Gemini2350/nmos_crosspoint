@@ -136,16 +136,27 @@
         min-height: 0 !important;
         white-space: normal !important;
         line-height: 1.5 !important;
+        // DaisyUI's `.btn` defaults to font-weight 600 (semi-bold) and adds
+        // a focus underline. The choice modal reads better as plain text,
+        // so we override both for the title + hint.
+        font-weight: 400 !important;
+        text-decoration: none !important;
 
         .auto-mc-title {
-            font-weight: 700;
+            font-weight: 500;       // medium, NOT bold — just enough hierarchy
             font-size: 1.1rem;
             margin-bottom: 8px;
+            text-decoration: none;
         }
         .auto-mc-hint {
             font-size: 0.9rem;
             opacity: 0.9;
-            font-weight: 400;
+            font-weight: 400;       // regular
+            text-decoration: none;
+        }
+
+        &:focus, &:focus-visible, &:active, &:hover {
+            text-decoration: none !important;
         }
     }
 
@@ -297,13 +308,9 @@
                 background-color: rgba(34,197,94,0.15);
                 color: theme('colors.green.400');
             }
-            &.lease-cat-audioLow {
+            &.lease-cat-audio {
                 background-color: rgba(245,158,11,0.15);
                 color: theme('colors.amber.400');
-            }
-            &.lease-cat-audioHigh {
-                background-color: rgba(245,158,11,0.25);
-                color: theme('colors.amber.300');
             }
         }
     }

@@ -237,6 +237,42 @@ $det-color-data:  theme('colors.blue.500');
             text-overflow: ellipsis;
         }
     }
+
+    // ----- TX / RX optical distinction -----
+    // Senders → green accent, receivers → sky-blue. Matches the colours on
+    // the SENDERS / RECEIVERS section headers. To make the direction obvious
+    // at a glance we apply: (a) a meaningful row tint, (b) a 4 px coloured
+    // left border on the row, and (c) the same coloured border on the
+    // section header so the whole block reads as a single coloured stripe.
+    tr.det-flow-tx {
+        background-color: rgba(34, 197, 94, 0.10);     // green tint
+        td:first-child {
+            box-shadow: inset 4px 0 0 0 theme('colors.green.500');
+        }
+        &:hover { background-color: rgba(34, 197, 94, 0.18); }
+        &.is-active td { /* no extra tint */ }
+    }
+    tr.det-flow-rx {
+        background-color: rgba(56, 189, 248, 0.10);    // sky tint
+        td:first-child {
+            box-shadow: inset 4px 0 0 0 theme('colors.sky.500');
+        }
+        &:hover { background-color: rgba(56, 189, 248, 0.18); }
+    }
+    // Section header carries the same accent stripe so the eye groups all
+    // following TX-rows / RX-rows together at a glance.
+    tr.det-section.det-section-senders td:first-child {
+        box-shadow: inset 4px 0 0 0 theme('colors.green.500');
+    }
+    tr.det-section.det-section-receivers td:first-child {
+        box-shadow: inset 4px 0 0 0 theme('colors.sky.500');
+    }
+    // Unavailable rows: keep the direction colour visible but soften it so
+    // the overall row reads as muted.
+    tr.det-flow.is-unavailable {
+        &.det-flow-tx { background-color: rgba(34, 197, 94, 0.04); }
+        &.det-flow-rx { background-color: rgba(56, 189, 248, 0.04); }
+    }
     // Flex row for the name + pencil button, keeps them on one line.
     .det-flow-name {
         display: flex;

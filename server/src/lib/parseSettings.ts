@@ -37,32 +37,12 @@ export function parseSettings(settings:any){
     // of media type. Pairs of (odd IP, odd+1) are allocated within the range
     // so the same sender always uses primary (odd) for Leg 1 and secondary
     // (odd+1) for Leg 2 — the +1 stays reserved even for single-leg senders.
-    //
-    // Migration: older configs split the pool into three category-specific
-    // ranges (audioLow / audioHigh / video). We collapse those into the
-    // single field by picking the first valid one we find (preferring video).
     let defaultRange:string = "239.30.0.0/16";
     let cidrRe = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
-    let migrated:string = "";
-    if(typeof settings.multicastRange === "string" && cidrRe.test(settings.multicastRange.trim())){
-        migrated = settings.multicastRange.trim();
+    if(typeof settings.multicastRange !== "string" || !cidrRe.test(settings.multicastRange.trim())){
+        settings.multicastRange = defaultRange;
     }else{
-        let oldR:any = (settings.multicastRanges && typeof settings.multicastRanges === "object") ? settings.multicastRanges : {};
-        // Try the most-spacious slot first (video typically had the biggest pool).
-        for(let key of ["video","audioLow","audioHigh","audio","other"] as const){
-            let candidate:any = oldR[key];
-            if(typeof candidate === "string" && cidrRe.test(candidate)){
-                migrated = candidate; break;
-            }
-            if(candidate && typeof candidate === "object" && typeof candidate.primary === "string" && cidrRe.test(candidate.primary)){
-                migrated = candidate.primary; break;
-            }
-        }
-    }
-    settings.multicastRange = migrated || defaultRange;
-    // Drop the obsolete per-category map so settings.json stays clean.
-    if(settings.hasOwnProperty("multicastRanges")){
-        delete settings.multicastRanges;
+        settings.multicastRange = settings.multicastRange.trim();
     }
 
 

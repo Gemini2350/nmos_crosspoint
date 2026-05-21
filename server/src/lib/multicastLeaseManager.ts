@@ -9,16 +9,14 @@
  *     switch to dual-leg doesn't get a different secondary.
  *   - Leases live forever until the device is explicitly deleted by the user.
  *
- * Categorisation:
- *   - video      → media_type starts with "video/"
- *   - audioLow   → audio with channels <= 2
- *   - audioHigh  → audio with channels >  2
- *   - other      → not auto-allocated (no range, no lease)
+ * Categorisation (UI badge only — every category draws from the same pool):
+ *   - video → media_type starts with "video/"
+ *   - audio → media_type starts with "audio/"
+ *   - other → not auto-allocated (no range, no lease)
  *
- * Duplicate protection: we maintain a *global* IP→sender index across all
- * categories. The allocator checks both the primary and the secondary slot
- * against this index, so overlapping CIDR ranges between categories or
- * manual edits cannot produce a duplicate Multicast.
+ * Duplicate protection: a *global* IP→sender index is maintained. The
+ * allocator checks both the primary and the secondary slot against this
+ * index, so manual edits cannot produce a duplicate Multicast.
  *
  * Persistence: ./state/multicastLeases.json (atomic write).
  */
@@ -29,9 +27,9 @@ const fs = require("fs");
 const path = require("path");
 
 // `category` is kept on the lease purely for the inventory UI badge
-// (audio/video colour-coding). All allocations share the SAME pool now;
-// the categorisation no longer affects which range is used.
-export type MulticastCategory = "audioLow" | "audioHigh" | "video";
+// (audio/video colour-coding). All allocations share the SAME pool;
+// the categorisation does not influence which range is used.
+export type MulticastCategory = "audio" | "video";
 
 export interface MulticastLease {
     createdAt: string;
@@ -384,12 +382,10 @@ export class MulticastLeaseManager {
     // ----- Stats / Inventory -----
 
     /**
-     * Pool stats. Now that we use a single shared pool the result is one
-     * `total` (pair count in the configured CIDR) and one `used` (the
-     * number of leases — every lease occupies exactly one pair). For
-     * back-compat with the existing setupConfig SyncObject we also expose
-     * the legacy per-category shape so any cached UI snapshot keeps
-     * rendering until a new one arrives.
+     * Pool stats. Single shared pool: one `total` (pair count in the
+     * configured CIDR) and one `used` (number of leases — each lease
+     * occupies exactly one pair). The per-category counts (audio / video)
+     * are surfaced for the inventory filter UI.
      */
     getStats(): { pool: LeaseStats } & { [cat in MulticastCategory]?: LeaseStats } {
         const range = this.getPoolRange();
@@ -397,18 +393,15 @@ export class MulticastLeaseManager {
         if (range) total = Math.floor((range.end - range.start + 1) / 2);
         const used = Object.keys(this.leases).length;
 
-        const perCat: { [cat in MulticastCategory]: number } = {
-            audioLow: 0, audioHigh: 0, video: 0,
-        };
+        const perCat: { [cat in MulticastCategory]: number } = { audio: 0, video: 0 };
         for (const id in this.leases) {
             const l = this.leases[id];
             if (l && (l.category in perCat)) perCat[l.category]++;
         }
         return {
-            pool:      { used, total },
-            audioLow:  { used: perCat.audioLow,  total },
-            audioHigh: { used: perCat.audioHigh, total },
-            video:     { used: perCat.video,     total },
+            pool:  { used, total },
+            audio: { used: perCat.audio, total },
+            video: { used: perCat.video, total },
         };
     }
 
@@ -437,7 +430,7 @@ export class MulticastLeaseManager {
 
         for (const id in data.leases) {
             const raw = data.leases[id];
-            if (!raw || !raw.category || !["audioLow","audioHigh","video"].includes(raw.category)) { dropped++; continue; }
+            if (!raw || !["audio","video"].includes(raw.category)) { dropped++; continue; }
             if (typeof raw.primaryIp !== "string" || typeof raw.secondaryIp !== "string") { dropped++; continue; }
             if (newIndex.has(raw.primaryIp) || newIndex.has(raw.secondaryIp)) {
                 SyncLog.log("warn", "Multicast Lease", "Import dropping duplicate lease for " + id + " — IP already claimed.");
@@ -528,7 +521,7 @@ export class MulticastLeaseManager {
                 let dropped = 0;
                 for (const id in data.leases) {
                     const l = data.leases[id];
-                    if (!l || !["audioLow","audioHigh","video"].includes(l.category)) { dropped++; continue; }
+                    if (!l || !["audio","video"].includes(l.category)) { dropped++; continue; }
 
                     // Drop leases with empty / invalid IPs — older bugs could
                     // produce these and they cause an infinite reconcile loop.
@@ -600,12 +593,10 @@ export class MulticastLeaseManager {
 
     // ----- Internal: classification & pair allocation -----
 
-    private categorise(mediaType: string, channels: number): MulticastCategory | null {
+    private categorise(mediaType: string, _channels: number): MulticastCategory | null {
         if (!mediaType) return null;
         if (mediaType.startsWith("video/")) return "video";
-        if (mediaType.startsWith("audio/")) {
-            return (channels <= 2) ? "audioLow" : "audioHigh";
-        }
+        if (mediaType.startsWith("audio/")) return "audio";
         return null;
     }
 

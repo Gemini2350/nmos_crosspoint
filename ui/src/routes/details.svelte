@@ -20,6 +20,10 @@
       "video/colibri" : "Colibri Video",
       "audio/L16" : "16 Bit LPCM",
       "audio/L24" : "24 Bit LPCM",
+      // L32 is a 32-bit container; AES67 carries 24-bit LPCM samples
+      // padded into the upper 24 bits of each word, so we label it the
+      // same as L24 to match operator expectation.
+      "audio/L32" : "24 Bit LPCM",
       "audio/AM824" : "ST2110-31 AES3",
       "video/smpte291":"ANC"
     }
@@ -289,6 +293,8 @@
           switch(codec){
             case "L16":      pretty = "16 Bit LPCM"; break;
             case "L24":      pretty = "24 Bit LPCM"; break;
+            // L32 carries 24-bit LPCM samples padded into a 32-bit container.
+            case "L32":      pretty = "24 Bit LPCM"; break;
             case "AM824":    pretty = "ST2110-31 AES3"; break;
             case "RAW":      pretty = "RAW Video"; break;
             case "JXSV":     pretty = "JPEG-XS Video"; break;

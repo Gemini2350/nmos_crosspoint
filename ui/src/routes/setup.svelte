@@ -35,7 +35,7 @@
       autoMulticast: { enabled: boolean, reconnectReceiversOnSenderChange?: boolean };
       autoActivateInactiveSender: boolean;
       // pool = the single-range counter; per-cat fields kept for back-compat
-      multicastStats: { pool?: LeaseStat, audioLow?: LeaseStat, audioHigh?: LeaseStat, video?: LeaseStat };
+      multicastStats: { pool?: LeaseStat, audio?: LeaseStat, video?: LeaseStat };
       dnsPush: DnsPush;
       auth: { users: string[] };
       restartRequired: boolean;
@@ -129,7 +129,7 @@
     // Live lease inventory snapshot: { leases:{[id]:Lease}, stats:..., updatedAt:string }
     let leaseSnapshot:any = { leases:{}, stats:{}, updatedAt:"" };
     let inventoryFilter:string = "";
-    let inventoryCategoryFilter:string = "";  // "" / "audioLow" / "audioHigh" / "video"
+    let inventoryCategoryFilter:string = "";  // "" / "audio" / "video"
 
     onMount(() => {
       sync = ServerConnector.sync("setupConfig");
@@ -605,9 +605,8 @@
     }
     function categoryLabel(c:string){
       switch(c){
-        case "audioLow":  return "Audio Low";
-        case "audioHigh": return "Audio High";
-        case "video":     return "Video";
+        case "audio": return "Audio";
+        case "video": return "Video";
         default: return c || "—";
       }
     }
@@ -852,7 +851,7 @@
         lease release) <em>or</em> any other field like channel count, video format,
         colorimetry — re-execute the connection of every receiver currently subscribed to
         it so they pick up the new manifest. Recommended ON for production. The one-shot
-        „Reallocate from pool" sweep in <em>Multicast DHCP</em> ignores this setting and
+        „Renew from Pool" sweep in <em>Multicast DHCP</em> ignores this setting and
         always reconnects.
       </p>
 
@@ -888,7 +887,7 @@
     <section class="setup-section">
       <h3>Multicast DHCP</h3>
       <p class="setup-section-hint">
-        When enabled, the server reserves a pair of consecutive multicast addresses per sender
+        When enabled, the server reserves a pair of consecutive multicast addresses per <strong>active</strong> sender
         (odd for Leg 1, even = odd + 1 for Leg 2). The reservation is kept for the lifetime of the
         device — even if the sender goes offline — and is only released when the device is
         explicitly <em>Forget</em>en on the Details page or its lease is deleted in the inventory below.
@@ -945,8 +944,7 @@
                  bind:value={inventoryFilter} />
           <select class="select select-bordered select-sm" bind:value={inventoryCategoryFilter}>
             <option value="">All categories</option>
-            <option value="audioLow">Audio Low</option>
-            <option value="audioHigh">Audio High</option>
+            <option value="audio">Audio</option>
             <option value="video">Video</option>
           </select>
           <span class="lease-count">{leaseRows.length} shown</span>
@@ -1030,7 +1028,7 @@
 
 
     <section class="setup-section">
-      <h3>Vendor Profiles</h3>
+      <h3>Device Web UI Link Setup</h3>
       <p class="setup-section-hint">
         How the „Open device web UI" link on the Details page is built depends on the vendor.
         Profiles are checked top-to-bottom, the <strong>first</strong> match wins.
@@ -1297,8 +1295,8 @@
         <span class="auto-mc-hint">Adopt each sender's existing destination IP as its lease. No PATCH is sent, no stream is interrupted. Recommended for live systems.</span>
       </button>
       <button class="btn auto-mc-btn" on:click={()=>autoMcChoose(false)}>
-        <span class="auto-mc-title">Reallocate from pool</span>
-        <span class="auto-mc-hint">Force every active sender onto a fresh pool address and re-execute every existing receiver subscription so they follow the new IPs. Brief stream interruption per sender while the PATCH lands.</span>
+        <span class="auto-mc-title">Renew from Pool</span>
+        <span class="auto-mc-hint">Every active sender is assigned a fresh multicast from the pool. Existing connections are re-executed. Disabled senders receive a multicast as soon as they become active.</span>
       </button>
     </div>
     <div class="modal-action">

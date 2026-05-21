@@ -398,9 +398,20 @@ class CrosspointUpdateThread{
     updateShadow(){
         let changed = false;
 
-        for(let devId in this.crosspointShadow){
+        // Reset every grouphint device's `available` flag — each NMOS sender
+        // / receiver that still belongs to the group will flip it back to
+        // true below via `this.crosspointShadow.devices[groupId].available
+        // = true`. Bug fix: the original loop iterated `this.crosspointShadow`
+        // (the wrapper object) instead of `this.crosspointShadow.devices`,
+        // so this reset was a no-op and stale grouphint devices stayed
+        // available forever.
+        for(let devId in this.crosspointShadow.devices){
             if(devId.startsWith("nmosgrp_")){
-                this.crosspointShadow[devId].available = false;
+                // `available` isn't on the CrosspointShadowDevice interface;
+                // the rest of this file already pokes it via bracket
+                // notation (see line ~482), so do the same here to keep
+                // tsc happy without widening the type.
+                (this.crosspointShadow.devices[devId] as any)["available"] = false;
             }
         }
         if(this.nmosState){
@@ -416,6 +427,7 @@ class CrosspointUpdateThread{
                 return ComplexCompare(a.label,b.label);
             })
             for (let s of list) {
+                try {
                 let send:any = s;
 
                 let groupId = "";
@@ -423,31 +435,39 @@ class CrosspointUpdateThread{
                 let groupLabel = "";
 
                 if(this.nmosUseGroupHints && send.hasOwnProperty('tags') && send.tags.hasOwnProperty("urn:x-nmos:tag:grouphint/v1.0") && Array.isArray(send.tags["urn:x-nmos:tag:grouphint/v1.0"]) && send.tags["urn:x-nmos:tag:grouphint/v1.0"].length > 0){
-                    let group = (send.tags["urn:x-nmos:tag:grouphint/v1.0"][0] as string).split(':')[0];
+                    let tagVal = send.tags["urn:x-nmos:tag:grouphint/v1.0"][0];
+                    // Some devices send objects instead of strings here; coerce
+                    // defensively so .split() doesn't throw and kill the whole
+                    // sender → device re-creation pass.
+                    let group = ("" + (tagVal ?? "")).split(':')[0];
                     groupId = 'nmosgrp_' +md5(group+send.device_id);
                     groupHint = true;
                     if(this.nmosState.devices.hasOwnProperty(send.device_id)){
 
                         // If device is new, check naming
                         let groupLabels:string[] = [];
-                        this.nmosState.devices[send.device_id].senders.forEach((id:string)=>{
-                            if(this.nmosState.senders[id]){
-                                let otherSender = this.nmosState.senders[id]
-                                if(otherSender.hasOwnProperty('tags') && otherSender.tags.hasOwnProperty("urn:x-nmos:tag:grouphint/v1.0") && Array.isArray(otherSender.tags["urn:x-nmos:tag:grouphint/v1.0"]) && otherSender.tags["urn:x-nmos:tag:grouphint/v1.0"].length > 0  ) {
-                                    let otherGroup = (otherSender.tags["urn:x-nmos:tag:grouphint/v1.0"][0] as string).split(':')[0];
-                                    if(!groupLabels.includes(otherGroup)){
-                                        groupLabels.push(otherGroup);
+                        let devSenders = this.nmosState.devices[send.device_id].senders;
+                        if(Array.isArray(devSenders)){
+                            devSenders.forEach((id:string)=>{
+                                if(this.nmosState.senders[id]){
+                                    let otherSender = this.nmosState.senders[id]
+                                    if(otherSender.hasOwnProperty('tags') && otherSender.tags.hasOwnProperty("urn:x-nmos:tag:grouphint/v1.0") && Array.isArray(otherSender.tags["urn:x-nmos:tag:grouphint/v1.0"]) && otherSender.tags["urn:x-nmos:tag:grouphint/v1.0"].length > 0  ) {
+                                        let otherTagVal = otherSender.tags["urn:x-nmos:tag:grouphint/v1.0"][0];
+                                        let otherGroup = ("" + (otherTagVal ?? "")).split(':')[0];
+                                        if(!groupLabels.includes(otherGroup)){
+                                            groupLabels.push(otherGroup);
+                                        }
                                     }
                                 }
-                            }
-                            
-                        })
+
+                            })
+                        }
                         if(groupLabels.length > 1){
                             groupLabel = this.nmosState.devices[send.device_id].label + " - " + group;
                         }else{
                             groupLabel = this.nmosState.devices[send.device_id].label;
                         }
-                        
+
                     }else{
                         groupLabel = group;
                     }
@@ -460,7 +480,7 @@ class CrosspointUpdateThread{
                     }
                 }
 
-                
+
 
 
                 if(!this.crosspointShadow.devices.hasOwnProperty(groupId)){
@@ -517,8 +537,23 @@ class CrosspointUpdateThread{
                             this.crosspointShadow.devices[groupId].senders[type]["nmos_"+send.id].name = send.label;
                             changed = true;
                         }
-                        
+
                     }
+                } catch (sendErr:any) {
+                    // Defensive: one malformed sender (e.g. weird grouphint
+                    // tag shape) must NOT prevent the loop from creating /
+                    // updating shadow entries for the rest. Without this
+                    // guard a single bad sender takes down the entire
+                    // device row in the UI — and after a Forget the device
+                    // never gets re-added because re-add happens right here.
+                    try {
+                        parentPort.postMessage(JSON.stringify({
+                            log:{ severity:"warn", topic:"Crosspoint",
+                                  text:"updateShadow: skipped sender due to error: " + (sendErr?.message || sendErr),
+                                  raw:{ senderId: (s as any)?.id || "?", label: (s as any)?.label || "" } }
+                        }));
+                    } catch(e) {}
+                }
             }
 
             // NMOS Receivers
@@ -535,6 +570,7 @@ class CrosspointUpdateThread{
 
 
             for (let r of list) {
+                try {
                 let recv:any = r;
 
                 let groupId = "";
@@ -542,8 +578,9 @@ class CrosspointUpdateThread{
                 let groupLabel = "";
 
                 if(this.nmosUseGroupHints && recv.hasOwnProperty('tags') && recv.tags.hasOwnProperty("urn:x-nmos:tag:grouphint/v1.0") && Array.isArray(recv.tags["urn:x-nmos:tag:grouphint/v1.0"]) && recv.tags["urn:x-nmos:tag:grouphint/v1.0"].length > 0){
-                    let group = (recv.tags["urn:x-nmos:tag:grouphint/v1.0"][0] as string).split(':')[0];
-                    let flowNameFromGroup = (recv.tags["urn:x-nmos:tag:grouphint/v1.0"][0] as string).split(':')[1];
+                    let tagVal = recv.tags["urn:x-nmos:tag:grouphint/v1.0"][0];
+                    let group = ("" + (tagVal ?? "")).split(':')[0];
+                    let flowNameFromGroup = ("" + (tagVal ?? "")).split(':')[1];
                     groupId = 'nmosgrp_' +md5(group+recv.device_id);
                     groupHint = true;
                     if(this.nmosState.devices.hasOwnProperty(recv.device_id)){
@@ -553,18 +590,26 @@ class CrosspointUpdateThread{
 
                         // If device is new, check naming
                         let groupLabels:string[] = [];
-                        this.nmosState.devices[recv.device_id].senders.forEach((id:string)=>{
-                            if(this.nmosState.receivers[id]){
-                                let otherReceiver = this.nmosState.receivers[id]
-                                if(otherReceiver.hasOwnProperty('tags') && otherReceiver.tags.hasOwnProperty("urn:x-nmos:tag:grouphint/v1.0") && Array.isArray(otherReceiver.tags["urn:x-nmos:tag:grouphint/v1.0"]) && otherReceiver.tags["urn:x-nmos:tag:grouphint/v1.0"].length > 0  ) {
-                                    let otherGroup = (otherReceiver.tags["urn:x-nmos:tag:grouphint/v1.0"][0] as string).split(':')[0];
-                                    if(!groupLabels.includes(otherGroup)){
-                                        groupLabels.push(otherGroup);
+                        // NOTE: this iterates `.senders` of the device, but the
+                        // intent is clearly to look at sibling receivers. We
+                        // preserve the existing behaviour to avoid changing
+                        // user-visible grouping logic; just guard the access.
+                        let devSenders = this.nmosState.devices[recv.device_id].senders;
+                        if(Array.isArray(devSenders)){
+                            devSenders.forEach((id:string)=>{
+                                if(this.nmosState.receivers[id]){
+                                    let otherReceiver = this.nmosState.receivers[id]
+                                    if(otherReceiver.hasOwnProperty('tags') && otherReceiver.tags.hasOwnProperty("urn:x-nmos:tag:grouphint/v1.0") && Array.isArray(otherReceiver.tags["urn:x-nmos:tag:grouphint/v1.0"]) && otherReceiver.tags["urn:x-nmos:tag:grouphint/v1.0"].length > 0  ) {
+                                        let otherTagVal = otherReceiver.tags["urn:x-nmos:tag:grouphint/v1.0"][0];
+                                        let otherGroup = ("" + (otherTagVal ?? "")).split(':')[0];
+                                        if(!groupLabels.includes(otherGroup)){
+                                            groupLabels.push(otherGroup);
+                                        }
                                     }
                                 }
-                            }
-                            
-                        })
+
+                            })
+                        }
                         if(groupLabels.length > 1){
                             groupLabel = this.nmosState.devices[recv.device_id].label + " - " + group;
                         }else{
@@ -634,13 +679,63 @@ class CrosspointUpdateThread{
                             this.crosspointShadow.devices[groupId].receivers[type]["nmos_"+recv.id].name = recv.label;
                             changed = true;
                         }
-                        
+
                     }
+                } catch (recvErr:any) {
+                    try {
+                        parentPort.postMessage(JSON.stringify({
+                            log:{ severity:"warn", topic:"Crosspoint",
+                                  text:"updateShadow: skipped receiver due to error: " + (recvErr?.message || recvErr),
+                                  raw:{ receiverId: (r as any)?.id || "?", label: (r as any)?.label || "" } }
+                        }));
+                    } catch(e) {}
+                }
             }
         }
 
 
-        
+        // ----- Prune ghost devices -----
+        // A device entry in crosspointShadow.devices can outlive its NMOS
+        // source. If it ends up with ZERO senders and ZERO receivers in the
+        // shadow the UI filters it out completely (details.svelte:rebuild()
+        // skips empty devices) — no row, no Forget button — but the entry
+        // keeps sitting in /state/crosspoint.json across container rebuilds
+        // and inflates the Dev counter in the nav.
+        //
+        // Rule: an empty shadow entry is always garbage. The NMOS registry
+        // is the source of truth — if the device really exists and has
+        // flows, those flows will re-create the entry on the same tick
+        // (see the sender / receiver loops above). So pruning empty
+        // entries here is safe and self-healing.
+        try {
+            for(let devId of Object.keys(this.crosspointShadow.devices)){
+                let d:any = this.crosspointShadow.devices[devId];
+                if(!d) continue;
+
+                let hasSenders = false;
+                for(let t of Object.keys(d.senders || {})){
+                    if(Object.keys(d.senders[t] || {}).length > 0){ hasSenders = true; break; }
+                }
+                let hasReceivers = false;
+                if(!hasSenders){
+                    for(let t of Object.keys(d.receivers || {})){
+                        if(Object.keys(d.receivers[t] || {}).length > 0){ hasReceivers = true; break; }
+                    }
+                }
+
+                if(!hasSenders && !hasReceivers){
+                    parentPort.postMessage(JSON.stringify({
+                        log:{ severity:"info", topic:"Crosspoint",
+                              text:"Auto-pruned ghost device with no flows: " + devId,
+                              raw:{ name: d.name || "" } }
+                    }));
+                    delete this.crosspointShadow.devices[devId];
+                    try{ delete this.crosspointAlias[devId]; }catch(e){}
+                    changed = true;
+                }
+            }
+        } catch(e) {}
+
 
         this.informMulticast = true;
         if(changed){
@@ -656,12 +751,13 @@ class CrosspointUpdateThread{
     }
 
     updateState(){
-        
+
         this.crosspointState = {
             devices:[]
         }
         // devices
         for (let dev of Object.values(this.crosspointShadow.devices)) {
+            try {
             let device: CrosspointDevice = {
                 id:dev.id,
                 num:dev.num,
@@ -746,7 +842,10 @@ class CrosspointUpdateThread{
                                         source.capabilities.transport = "rtp";
                                     }
                                     source.capabilities.mediaTypes.push(this.nmosState.flows[this.nmosState.senders[nmosId].flow_id].media_type);
-                                    source.active = this.nmosState.senders[nmosId].subscription.active
+                                    // Subscription may not yet be populated for a freshly-
+                                    // registered sender — guard with optional chaining so an
+                                    // exception here doesn't kill the entire device row.
+                                    source.active = !!this.nmosState.senders[nmosId].subscription?.active;
                                 }
                             }
                         }
@@ -798,11 +897,15 @@ class CrosspointUpdateThread{
                                     ){
                                         receiver.capabilities.transport = "rtp";
                                     }
-                                    receiver.active = this.nmosState.receivers[nmosId].subscription.active
-                                    receiver.capabilities.mediaTypes = this.nmosState.receivers[nmosId].caps.media_types;
-                                    if( this.nmosState.receivers[nmosId].subscription.active && this.nmosState.receivers[nmosId].subscription.sender_id){
-                                        receiver.connectedFlow = "nmos_"+this.nmosState.receivers[nmosId].subscription.sender_id;
-                                        device.connectedFlows.push("nmos_"+this.nmosState.receivers[nmosId].subscription.sender_id);
+                                    // Same defensive treatment as the sender side — a brand-
+                                    // new IS-04 receiver may lack `subscription` or `caps`
+                                    // until the registry pushes the full record.
+                                    receiver.active = !!this.nmosState.receivers[nmosId].subscription?.active;
+                                    receiver.capabilities.mediaTypes = this.nmosState.receivers[nmosId].caps?.media_types || [];
+                                    let sub:any = this.nmosState.receivers[nmosId].subscription;
+                                    if(sub && sub.active && sub.sender_id){
+                                        receiver.connectedFlow = "nmos_" + sub.sender_id;
+                                        device.connectedFlows.push("nmos_" + sub.sender_id);
                                     }
                                 }
                             }
@@ -817,6 +920,21 @@ class CrosspointUpdateThread{
 
 
             this.crosspointState.devices.push(device);
+            } catch (devErr:any) {
+                // Per-device defense in depth: a single malformed flow
+                // (e.g. a freshly-added IS-04 sender that arrives before its
+                // subscription/flow/source records are filled in) must NOT
+                // make the rest of the device tree disappear from the UI.
+                // Log and move on; the device gets another chance on the
+                // next worker tick once the registry data has settled.
+                try {
+                    parentPort.postMessage(JSON.stringify({
+                        log:{ severity:"warn", topic:"Crosspoint",
+                              text:"updateState: skipped device due to error: " + (devErr?.message || devErr),
+                              raw:{ devId: (dev && (dev as any).id) || "?" } }
+                    }));
+                } catch(e) {}
+            }
         }
 
         // Post process available
@@ -862,6 +980,9 @@ class CrosspointUpdateThread{
             
                 case 'audio/L24':
                 case 'audio/L16':
+                // L32 = 32-bit container, payload is 24-bit LPCM. Bandwidth
+                // calculation uses the full 32 bits per sample.
+                case 'audio/L32':
                 case 'audio':
                 case 'urn:x-nmos:format:audio': {
                     // Prefer SDP manifest values when present — see comment in getNmosSenderForamt().
@@ -880,6 +1001,7 @@ class CrosspointUpdateThread{
                                         let codec = rtp.codec.toUpperCase();
                                         if(codec === "L16"){ depth = 16; }
                                         else if(codec === "L24"){ depth = 24; }
+                                        else if(codec === "L32"){ depth = 32; }   // 24-bit LPCM in a 32-bit container
                                         else if(codec === "AM824"){ depth = 32; }
                                     }
                                     break;

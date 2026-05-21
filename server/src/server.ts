@@ -16,7 +16,6 @@ import { WebsocketClient } from "./lib/SyncServer/websocketClient";
 
 import { WebsocketSyncServer } from "./lib/SyncServer/websocketSyncServer";
 import { CrosspointAbstraction } from "./lib/crosspointAbstraction";
-import { MediaDevices } from "./lib/mediaDevices";
 import { SyncObject } from "./lib/SyncServer/syncObject";
 import { parseSettings } from "./lib/parseSettings";
 import { MulticastLeaseManager } from "./lib/multicastLeaseManager";
@@ -105,9 +104,6 @@ if(users){
 }
 
 
-// TODO.... load dynamic....
-const mediaDevices = new MediaDevices(settings);
-
 const crosspoint = new CrosspointAbstraction(settings);
 const nmosConnector = new NmosRegistryConnector(settings);
 const multicastLeaseManager = new MulticastLeaseManager(settings);
@@ -193,7 +189,7 @@ function getSetupConfigState() {
     let autoActivateInactiveSender = !!settings.autoActivateInactiveSender;
     let multicastStats = (MulticastLeaseManager.instance
         ? MulticastLeaseManager.instance.getStats()
-        : { pool:{used:0,total:0}, audioLow:{used:0,total:0}, audioHigh:{used:0,total:0}, video:{used:0,total:0} });
+        : { pool:{used:0,total:0}, audio:{used:0,total:0}, video:{used:0,total:0} });
 
     // DNS Push settings — the API key is never sent back to the client.
     // `apiKeySet` lets the UI show a placeholder so the user knows a key is
@@ -463,12 +459,6 @@ server.addRoute("POST", "setupConfig","global", (client: WebsocketClient, query:
             settings.vendorProfiles = next.vendorProfiles;
             if(typeof next.multicastRange === "string" && next.multicastRange){
                 settings.multicastRange = next.multicastRange;
-            }
-            // Older installs may still have the obsolete per-category map on
-            // disk — purge it on every save so future settings.json writes
-            // stay clean.
-            if(settings.hasOwnProperty("multicastRanges")){
-                delete settings.multicastRanges;
             }
             let autoMulticastWasEnabled = !!(settings.autoMulticast && settings.autoMulticast.enabled);
             settings.autoMulticast = { enabled: !!next.autoMulticast.enabled };
