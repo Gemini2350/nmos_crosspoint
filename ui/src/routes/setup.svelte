@@ -122,7 +122,9 @@
     let sync:Subject<any>;
     let syncNmos:Subject<any>;
     let syncLeases:Subject<any>;
+    let syncCrosspoint:Subject<any>;
     let nmosState:any = { nodes:{}, devices:{}, senders:{}, receivers:{} };
+    let crosspointState:any = { devices:[] };
 
     // Live lease inventory snapshot: { leases:{[id]:Lease}, stats:..., updatedAt:string }
     let leaseSnapshot:any = { leases:{}, stats:{}, updatedAt:"" };
@@ -171,14 +173,21 @@
       });
       syncNmos = ServerConnector.sync("nmos");
       syncNmos.subscribe((obj:any)=>{
-        if(obj){
-          nmosState = obj;
-          recomputeDetected();
-        }
+        if(obj){ scheduleStateUpdate("nmos", obj); }
       });
       syncLeases = ServerConnector.sync("multicastLeases");
       syncLeases.subscribe((obj:any)=>{
         if(obj){ leaseSnapshot = obj; }
+      });
+      // Crosspoint state carries the per-flow bitrate the worker thread
+      // computes from each sender's NMOS flow. We use it to surface the
+      // bitrate column in the lease inventory. Patches arrive in bursts on
+      // big systems — coalesce them via rAF so the reactive `$:` chain
+      // (buildBitrateIndex + recomputeLeaseRows + recomputeDetected) runs
+      // at most once per frame.
+      syncCrosspoint = ServerConnector.sync("crosspoint");
+      syncCrosspoint.subscribe((obj:any)=>{
+        if(obj){ scheduleStateUpdate("crosspoint", obj); }
       });
     });
 
@@ -189,7 +198,43 @@
       try{ServerConnector.unsync("nmos");}catch(e){}
       try{syncLeases && syncLeases.unsubscribe();}catch(e){}
       try{ServerConnector.unsync("multicastLeases");}catch(e){}
+      try{syncCrosspoint && syncCrosspoint.unsubscribe();}catch(e){}
+      try{ServerConnector.unsync("crosspoint");}catch(e){}
     });
+
+    // Coalesce rapid sync patches into one Svelte update per animation
+    // frame. The crosspoint and nmos SyncObjects deliver one patch per
+    // upstream event, which on a big NMOS registry adds up to dozens per
+    // second. Without coalescing every patch ran buildBitrateIndex(),
+    // recomputeLeaseRows() and recomputeDetected() synchronously — easily
+    // multi-millisecond on big states. With rAF batching the same handler
+    // runs at most ~60Hz.
+    let _pendingState: { nmos?:any, crosspoint?:any } = {};
+    let _stateScheduled = false;
+    function scheduleStateUpdate(kind:"nmos"|"crosspoint", val:any){
+      _pendingState[kind] = val;
+      if(_stateScheduled) return;
+      _stateScheduled = true;
+      const run = () => {
+        _stateScheduled = false;
+        let p = _pendingState;
+        _pendingState = {};
+        // Reassign — Svelte's `$:` reactive block on (formProfiles,
+        // nmosState, recomputeDetected) below picks it up exactly once
+        // per tick, no matter how many WS patches landed this frame.
+        if(p.nmos !== undefined){
+          nmosState = p.nmos;
+        }
+        if(p.crosspoint !== undefined){
+          crosspointState = p.crosspoint;
+        }
+      };
+      if(typeof requestAnimationFrame === "function"){
+        requestAnimationFrame(run);
+      }else{
+        setTimeout(run, 16);
+      }
+    }
 
     function markDirty(){
       dirty = true;
@@ -455,6 +500,9 @@
       secondaryIp: string;
       port: number;
       createdAt: string;
+      // Bitrate as supplied by the crosspoint worker (Mbps). May be 0 / null
+      // for senders that aren't currently in the crosspoint state.
+      bitrate: any;
       // Live state from NMOS, looked up on every recompute.
       // "active":   sender is in the NMOS registry and master_enable=true
       // "inactive": sender is in the NMOS registry but master_enable=false
@@ -462,13 +510,38 @@
       liveStatus: "active" | "inactive" | "missing";
     }
     let leaseRows:LeaseRow[] = [];
-    // Recompute whenever leases, filter, or NMOS state change.
-    $: leaseRows = recomputeLeaseRows(leaseSnapshot, inventoryFilter, inventoryCategoryFilter, nmosState);
-    function recomputeLeaseRows(snap:any, filterStr:string, catFilterStr:string, nmos:any):LeaseRow[]{
+    // Recompute whenever leases, filter, NMOS state, or crosspoint state change.
+    $: leaseRows = recomputeLeaseRows(leaseSnapshot, inventoryFilter, inventoryCategoryFilter, nmosState, crosspointState);
+
+    // Build a fast { senderUuid → bitrate } map from the crosspoint state.
+    // Crosspoint flow ids are namespaced as "nmos_<uuid>"; the lease snapshot
+    // keys are raw UUIDs.
+    function buildBitrateIndex(cp:any): { [uuid:string]: any } {
+      let out: { [uuid:string]: any } = {};
+      try{
+        let devs = (cp && Array.isArray(cp.devices)) ? cp.devices : [];
+        for(let d of devs){
+          if(!d || !d.senders) continue;
+          for(let type of Object.keys(d.senders)){
+            let arr = d.senders[type];
+            if(!Array.isArray(arr)) continue;
+            for(let s of arr){
+              if(!s || typeof s.id !== "string") continue;
+              if(!s.id.startsWith("nmos_")) continue;
+              out[s.id.slice(5)] = s.bitrate;
+            }
+          }
+        }
+      }catch(e){}
+      return out;
+    }
+
+    function recomputeLeaseRows(snap:any, filterStr:string, catFilterStr:string, nmos:any, cp:any):LeaseRow[]{
       let arr:LeaseRow[] = [];
       let raw = snap && snap.leases ? snap.leases : {};
       let needle = (filterStr || "").toLowerCase();
       let catFilter = catFilterStr || "";
+      let bitrateByUuid = buildBitrateIndex(cp);
       for(let id in raw){
         let l = raw[id];
         if(!l) continue;
@@ -494,6 +567,7 @@
           secondaryIp: l.secondaryIp || "",
           port: l.port || 0,
           createdAt: l.createdAt || "",
+          bitrate: bitrateByUuid[id],
           liveStatus
         });
       }
@@ -503,6 +577,22 @@
         return ipCompare(a.primaryIp, b.primaryIp);
       });
       return arr;
+    }
+
+    // Same format as the Details page: "<v>.x Mbit/s" or "—" if unknown.
+    function renderBitrate(bitrate:any):string {
+      let v:number = 0;
+      let hint:string = "ok";
+      if(typeof bitrate === "number"){
+        v = bitrate;
+      }else if(bitrate && typeof bitrate === "object"){
+        v = Number(bitrate.v) || 0;
+        hint = bitrate.hint || "ok";
+      }
+      v = Math.round(v*10)/10;
+      if(hint === "unknown" || v <= 0){ return "—"; }
+      if(v < 1){ return "< 1 Mbit/s"; }
+      return v.toFixed(1) + " Mbit/s";
     }
     function ipCompare(a:string, b:string){
       let pa = a.split(".").map(x=>parseInt(x));
@@ -532,30 +622,41 @@
 
 
     // ----- Release a single lease from the inventory -----
-    let releaseModal:any;
-    let releaseTarget:LeaseRow | null = null;
-    let releaseError:string = "";
+    // Per user request the confirmation modal is gone — clicking the trash
+    // icon releases the lease immediately. The lease list updates within
+    // a tick via the multicastLeases SyncObject.
+    let releaseInventoryError:string = "";
     function askReleaseLease(row:LeaseRow){
-      releaseTarget = row;
-      releaseError = "";
-      if(releaseModal){ releaseModal.showModal(); }
-    }
-    function cancelReleaseLease(){
-      releaseTarget = null;
-      releaseError = "";
-      if(releaseModal){ releaseModal.close(); }
-    }
-    function confirmReleaseLease(){
-      if(!releaseTarget) return;
-      let sid = releaseTarget.senderId;
-      ServerConnector.post("releaseLease", { senderId: sid })
-        .then(()=>{
-          releaseTarget = null;
-          if(releaseModal){ releaseModal.close(); }
-        })
+      if(!row || !row.senderId) return;
+      releaseInventoryError = "";
+      ServerConnector.post("releaseLease", { senderId: row.senderId })
         .catch((e:any)=>{
-          releaseError = (e && e.message) ? e.message : "Release failed.";
+          releaseInventoryError = (e && e.message) ? e.message : "Release failed.";
         });
+    }
+
+    // ----- Release every lease at once -----
+    // No modal — a single click clears the whole pool. The server logs the
+    // batch and active senders will be re-allocated on the next reconcile
+    // if auto-allocation is enabled.
+    let releaseAllBusy:boolean = false;
+    let releaseAllStatus:string = "";
+    function releaseAllLeases(){
+      if(releaseAllBusy) return;
+      releaseAllBusy = true;
+      releaseAllStatus = "";
+      releaseInventoryError = "";
+      ServerConnector.post("releaseAllLeases", {}).then((resp:any)=>{
+        releaseAllBusy = false;
+        let n = (resp?.data?.released ?? 0) | 0;
+        releaseAllStatus = (n === 0)
+          ? "No leases to release."
+          : ("Released " + n + " lease" + (n === 1 ? "" : "s") + ".");
+        setTimeout(()=>{ releaseAllStatus = ""; }, 4000);
+      }).catch((e:any)=>{
+        releaseAllBusy = false;
+        releaseInventoryError = (e && e.message) ? e.message : "Release-all failed.";
+      });
     }
 
 
@@ -770,9 +871,9 @@
         When a connection is made on the Crosspoint page whose source sender is
         currently <em>inactive</em> (master_enable&nbsp;=&nbsp;false), automatically
         PATCH that sender active first, wait for it to (re)publish its SDP,
-        and only then patch the receiver. Off by default — many control rooms
-        gate sender activation through a separate workflow and don't want a
-        stray click on the matrix to push a signal on the wire.
+        and only then patch the receiver. Off by default. Many control rooms
+        have sender activation through a separate workflow and don't want a
+        stray click on the matrix to push a sender in transmitting state.
       </p>
 
       <div class="setup-form">
@@ -849,6 +950,18 @@
             <option value="video">Video</option>
           </select>
           <span class="lease-count">{leaseRows.length} shown</span>
+          <button class="btn btn-sm btn-error"
+                  on:click={releaseAllLeases}
+                  disabled={releaseAllBusy || Object.keys(leaseSnapshot.leases || {}).length === 0}
+                  title="Release every lease in the pool. Active senders with auto-allocation enabled will receive a fresh pair on the next reconcile.">
+            {#if releaseAllBusy}Releasing…{:else}Release all leases{/if}
+          </button>
+          {#if releaseAllStatus}
+            <span class="text-success">{releaseAllStatus}</span>
+          {/if}
+          {#if releaseInventoryError}
+            <span class="text-error">{releaseInventoryError}</span>
+          {/if}
         </div>
 
         <div class="lease-table-wrap">
@@ -862,6 +975,7 @@
                 <th>Leg 1 (primary)</th>
                 <th>Leg 2 (secondary)</th>
                 <th>Port</th>
+                <th>Bitrate</th>
                 <th>Allocated</th>
                 <th></th>
               </tr>
@@ -890,6 +1004,7 @@
                   <td class="vendor-mono">{r.primaryIp || "—"}</td>
                   <td class="vendor-mono">{r.secondaryIp || "—"}</td>
                   <td class="vendor-mono">{r.port || "—"}</td>
+                  <td class="vendor-mono">{renderBitrate(r.bitrate)}</td>
                   <td><span class="lease-date">{fmtDate(r.createdAt)}</span></td>
                   <td>
                     <button class="btn btn-ghost btn-xs lease-release-btn"
@@ -901,7 +1016,7 @@
                 </tr>
               {/each}
               {#if leaseRows.length === 0}
-                <tr><td colspan="9" class="vendor-empty">
+                <tr><td colspan="10" class="vendor-empty">
                   {Object.keys(leaseSnapshot.leases || {}).length === 0
                     ? "No leases allocated yet."
                     : "No leases match the current filter."}
@@ -1193,31 +1308,4 @@
 </dialog>
 
 
-<dialog bind:this={releaseModal} class="modal">
-  <div class="modal-box">
-    <form method="dialog">
-      <button on:click={cancelReleaseLease} class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
-    </form>
-    <h3 class="font-bold text-lg">Release multicast lease?</h3>
-    {#if releaseTarget}
-      <p style="margin-top:6px;">
-        <strong>{releaseTarget.deviceLabel || releaseTarget.senderId}</strong> —
-        <span class="vendor-mono">{releaseTarget.primaryIp} / {releaseTarget.secondaryIp}</span>
-        ({categoryLabel(releaseTarget.category)})
-      </p>
-      <p style="margin-top:10px; color: var(--fallback-bc, oklch(var(--bc) / 0.7));">
-        The allocated pair will return to the pool. If the sender is still
-        online and Multicast DHCP is enabled, it will receive a fresh pair
-        on the next reconcile cycle.
-      </p>
-    {/if}
-    {#if releaseError}
-      <p class="text-error" style="margin-top:8px;">{releaseError}</p>
-    {/if}
-    <div class="modal-action">
-      <button on:click={cancelReleaseLease} class="btn">Cancel</button>
-      <button on:click={confirmReleaseLease} class="btn btn-error">Release</button>
-    </div>
-  </div>
-</dialog>
 

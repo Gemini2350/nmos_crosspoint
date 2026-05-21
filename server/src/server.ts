@@ -340,6 +340,26 @@ server.addRoute("POST", "releaseLease","global", (client: WebsocketClient, query
     });
 });
 
+// Release every multicast lease in one shot. Active senders that still need
+// a lease and have auto-allocation enabled will get a fresh pair allocated
+// on the next reconcile cycle — same path as releasing a single lease.
+server.addRoute("POST", "releaseAllLeases","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        try{
+            let ids = Object.keys(multicastLeaseManager.getAllLeases());
+            if(ids.length === 0){
+                resolve({message:200, data:{ released: 0 }});
+                return;
+            }
+            multicastLeaseManager.releaseLeases(ids);
+            SyncLog.log("info", "Multicast Lease", "Released ALL " + ids.length + " leases via UI.");
+            resolve({message:200, data:{ released: ids.length }});
+        }catch(e:any){
+            reject({message: (e && e.message) ? e.message : "releaseAllLeases failed"});
+        }
+    });
+});
+
 server.addRoute("POST", "setupConfig","global", (client: WebsocketClient, query:string[], postData: any) => {
     return new Promise((resolve, reject) => {
         try{

@@ -90,7 +90,29 @@
     let countAvailDev = 0, countTotalDev = 0;
     let countAvailTx  = 0, countTotalTx  = 0;
     let countAvailRx  = 0, countTotalRx  = 0;
-    function recomputeAvailability(state:any){
+    // Heaviest part of this counter is the O(devices*flows) walk. With lots
+    // of senders the crosspoint SyncObject can deliver many patches in quick
+    // succession — coalesce them into a single recompute per animation
+    // frame so we don't burn CPU on every tiny patch.
+    let _pendingCrosspoint:any = null;
+    let _availScheduled = false;
+    function scheduleRecomputeAvailability(state:any){
+      _pendingCrosspoint = state;
+      if(_availScheduled) return;
+      _availScheduled = true;
+      const run = () => {
+        _availScheduled = false;
+        const s = _pendingCrosspoint;
+        _pendingCrosspoint = null;
+        recomputeAvailabilityNow(s);
+      };
+      if(typeof requestAnimationFrame === "function"){
+        requestAnimationFrame(run);
+      }else{
+        setTimeout(run, 16);
+      }
+    }
+    function recomputeAvailabilityNow(state:any){
       let aDev = 0, tDev = 0;
       let aTx  = 0, tTx  = 0;
       let aRx  = 0, tRx  = 0;
@@ -143,7 +165,7 @@
 
       crosspointSync = ServerConnector.sync("crosspoint");
       crosspointSync.subscribe((obj:any)=>{
-        recomputeAvailability(obj);
+        scheduleRecomputeAvailability(obj);
       });
       
       ServerConnector.connectionState.subscribe((state)=>{

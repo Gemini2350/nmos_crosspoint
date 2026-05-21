@@ -703,6 +703,31 @@
     }
 
 
+    // ----- Coalesce rapid sync patches into one rebuild per animation frame -----
+    // The crosspoint and nmos SyncObjects each push a JSON-patch on every
+    // upstream change. When the registry has lots of senders these arrive in
+    // bursts (one per IS-04 event). rebuild() does a full O(devices*flows)
+    // walk plus DOM regeneration, so running it once per patch is the
+    // dominant cost on slow machines. requestAnimationFrame coalesces every
+    // patch that lands inside the same frame into a single rebuild() — the
+    // user never sees intermediate states anyway. Falls back to setTimeout
+    // when rAF isn't available (e.g. SSR-style environments).
+    let rebuildScheduled = false;
+    function scheduleRebuild(){
+      if(rebuildScheduled) return;
+      rebuildScheduled = true;
+      const run = () => {
+        rebuildScheduled = false;
+        try{ rebuild(); }catch(e){}
+      };
+      if(typeof requestAnimationFrame === "function"){
+        requestAnimationFrame(run);
+      }else{
+        setTimeout(run, 16);
+      }
+    }
+
+
     onMount(async () => {
       try{
         let f = localStorage.getItem("nmos_details_filter");
@@ -719,12 +744,12 @@
       sync = ServerConnector.sync("crosspoint")
       sync.subscribe((obj:any)=>{
         sourceState = obj;
-        rebuild();
+        scheduleRebuild();
       });
       syncNmos = ServerConnector.sync("nmos")
       syncNmos.subscribe((obj:any)=>{
         nmosState = obj;
-        rebuild();
+        scheduleRebuild();
       });
       syncSetup = ServerConnector.sync("setupConfig")
       syncSetup.subscribe((obj:any)=>{
@@ -735,7 +760,7 @@
           if(Array.isArray(obj.vendorProfiles)){
             vendorProfiles = obj.vendorProfiles;
             // Rebuild device URLs since vendor matching changed
-            rebuild();
+            scheduleRebuild();
             return;
           }
           // Re-render so device dots update without waiting for next rebuild().
