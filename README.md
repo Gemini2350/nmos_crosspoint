@@ -2,17 +2,18 @@
 
 NMOS Crosspoint is a web-based  **NMOS** Controller for **ST 2110 / AES67** media networks. It shows every device on your network, lets you route senders to receivers like a classic crosspoint, takes care of multicast addresses for you, and keeps things tidy with little touches like vendor-specific Web-UI links, DNS hostname registration and PTP health hints.
 
-![Crosspoint matrix](Screenshots/Screenshot%202026-05-22%20at%2000.58.10.png)
+![Crosspoint matrix](Screenshots/Screenshot%202026-05-22%20at%2010.19.32.png)
 
 Tested with a wide range of devices — Lawo, Riedel, Embrionix, AJA, Imagine, Sony, Grass Valley, Blackmagic, Merging, DirectOut, QSC, Matrox — and stable with more than 2000 flows. Let me know if you have any problems
 
 ![Details page](Screenshots/Screenshot%202026-05-22%20at%2000.55.31.png)
 
 
-## What it does
+## What it does 
 - **Autodiscover.** Finds Senders and Receivers according to NMOS IS-04
 - **Crosspoint matrix.** Click a sender and a receiver to connect them according to NMOS IS-05. Autotake or "stage and then TAKE" workflow.
-- **Multicast DHCP.** Hands out and tracks multicast addresses automatically from a pool you define. 
+- **Activate / Deactivate Senders.** Toggle a Sender to be master enabled=true/false. (option) 
+- **Multicast DHCP.** Hands out and tracks multicast addresses automatically from a pool you define. (option) 
 - **Manual multicast editing.** Each sender's leg can be overridden with a custom address on the Details page; clearing the field falls back to the DHCP-reserved one. 
 - **Duplicate-multicast detection.** Runs across every active sender on the network. The offending leg is flagged in the UI so you can spot the conflict immediately.
 
@@ -23,21 +24,12 @@ Tested with a wide range of devices — Lawo, Riedel, Embrionix, AJA, Imagine, S
 
 ![Forget badge on an offline sender](Screenshots/Screenshot%202026-05-22%20at%2001.38.13.png)
 - **Web-UI links.** One click opens the device's own configuration page in a new tab.
-- **DNS hostname push.** Each device's name lands as a `host_override` on your pfSense DNS resolver, so `Camera1.simplexity.training` resolves automatically. 
+- **DNS hostname push.** Each device's name lands as a `host_override` on your pfSense DNS resolver, so `Camera1.simplexity.training` resolves automatically. (option)
 - **Aliases.** Rename a device or a single flow to whatever your operators call it; the original NMOS label is still visible as a tooltip. NMOS IS-13 is planned to push  the Aliases back to the Device.
 - **Virtual Senders.** Want do use your old Devices without NMOS Support? Use them as Virtual-Sender in the Crosspoint Matrix by adding their SDP's in the Setup. 
-![Virtual Senders](Screenshots/Screenshot%202026-05-22%20at%2010.04.20.png)
-
-
-
-
 - **PTP health.** Tell Crosspoint which Grand-Master ID is the "correct" one and every device shows a green / yellow / red dot at a glance. 
-
-![PTP health dots — locked, unlocked, wrong GMID](Screenshots/Screenshot%202026-05-22%20at%2001.41.33.png)
 - **Bandwidth estimates.** Crosspoint computes a Mbit/s estimate per flow from the SDP.
 - **SDP viewer.** One-click on the `SDP` button next to a sender opens the raw SDP manifest in a modal.
-
-![SDP viewer modal](Screenshots/Screenshot%202026-05-22%20at%2001.38.20.png)
 - **Search and filter.** Three independent search boxes on the Details page: by name (device or flow alias), by codec / format (e.g. `L24`, `JPEG-XS`, `1080i50`), and by IP (`239.77.0.85` finds the one sender or receiver that uses that address). Tokens are matched against every matching field — type `Anubis 48` to narrow down to Anubis flows running at 48 kHz. Filters compose so you can quickly locate exactly the one flow you're looking for.
 
 ![Search by IP highlights the matching flow](Screenshots/Screenshot%202026-05-22%20at%2001.42.06.png)
@@ -83,14 +75,6 @@ Publish every device's name as a DNS entry on your pfSense Unbound resolver via 
 Update your admin user and password. You can only edit your own account and you have to know the current password. After a change the server logs you out and asks you to sign in again with the new credentials.
 
 ![Change login and password](Screenshots/Screenshot%202026-05-22%20at%2000.56.36.png)
-
-
-## Day-to-day usage
-
-- **Connect** — open Crosspoint, click a sender, click a receiver, done. With Autotake off you collect changes first and press TAKE to apply them all at once.
-- **Inspect a device** — Details page shows every flow, the live legs (IPs and ports), the SDP-derived format and bitrate, and lets you edit the alias or the multicast IP per leg. Duplicate multicasts are highlighted across the whole list so you can find clashing senders at a glance.
-- **Replace a device** — Forget the old one (releases its multicast leases, removes its DNS entry). Plug the new one in. It'll show up automatically.
-- **Spot a problem** — the right-hand nav has a live Dev / TX / RX counter that goes yellow / red when something becomes unreachable, visible from every page.
 
 
 ## What you need
@@ -141,10 +125,10 @@ flowchart TD
 
 ## Planned
 
-- Virtual senders and receivers
-- IS-07 (works today with easy-nmos-node)
-- IS-08 (in progress)
+- IS-07 
+- IS-08 
 - BCP-008
+- IS-12
 - IS-13
 
 
