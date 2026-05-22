@@ -9,10 +9,11 @@ Tested with a wide range of devices — Lawo, Riedel, Embrionix, AJA, Imagine, S
 ![Details page](Screenshots/Screenshot%202026-05-22%20at%2000.55.31.png)
 
 
-## What it does
+## What it does 
 - **Autodiscover.** Finds Senders and Receivers according to NMOS IS-04
 - **Crosspoint matrix.** Click a sender and a receiver to connect them according to NMOS IS-05. Autotake or "stage and then TAKE" workflow.
-- **Multicast DHCP.** Hands out and tracks multicast addresses automatically from a pool you define. 
+- **Activate / Deactivate Senders.** Toggle a Sender to be master enabled=true/false. (option) 
+- **Multicast DHCP.** Hands out and tracks multicast addresses automatically from a pool you define. (option) 
 - **Manual multicast editing.** Each sender's leg can be overridden with a custom address on the Details page; clearing the field falls back to the DHCP-reserved one. 
 - **Duplicate-multicast detection.** Runs across every active sender on the network. The offending leg is flagged in the UI so you can spot the conflict immediately.
 
@@ -23,7 +24,7 @@ Tested with a wide range of devices — Lawo, Riedel, Embrionix, AJA, Imagine, S
 
 ![Forget badge on an offline sender](Screenshots/Screenshot%202026-05-22%20at%2001.38.13.png)
 - **Web-UI links.** One click opens the device's own configuration page in a new tab.
-- **DNS hostname push.** Each device's name lands as a `host_override` on your pfSense DNS resolver, so `Camera1.simplexity.training` resolves automatically. 
+- **DNS hostname push.** Each device's name lands as a `host_override` on your pfSense DNS resolver, so `Camera1.simplexity.training` resolves automatically. (option)
 - **Aliases.** Rename a device or a single flow to whatever your operators call it; the original NMOS label is still visible as a tooltip. NMOS IS-13 is planned to push  the Aliases back to the Device.
 - **Virtual Senders.** Want do use your old Devices without NMOS Support? Use them as Virtual-Sender in the Crosspoint Matrix by adding their SDP's in the Setup. 
 ![Virtual Senders](Screenshots/Screenshot%202026-05-22%20at%2010.04.20.png)
