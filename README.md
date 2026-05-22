@@ -61,7 +61,7 @@ Per-vendor recipes for the "Open device Web UI" link on the Details page. Profil
 
 ![Detected devices with resolved Web-UI links](Screenshots/Screenshot%202026-05-22%20at%2001.36.51.png)
 
-**Push Names to DNS**
+**Virtual Senders**
 Setup Virtual Senders by adding their SDP. An Sender_ID is automatically generated. Connections are only Visible in Nmos-Crosspoint as the Sender_ID is only known to NMOS Crosspoint
 
 ![Setup Virtual Senders](Screenshots/Screenshot%202026-05-22%20at%2009.58.22.png)
