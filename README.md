@@ -86,14 +86,6 @@ Update your admin user and password. You can only edit your own account and you 
 ![Change login and password](Screenshots/Screenshot%202026-05-22%20at%2000.56.36.png)
 
 
-## Day-to-day usage
-
-- **Connect** — open Crosspoint, click a sender, click a receiver, done. With Autotake off you collect changes first and press TAKE to apply them all at once.
-- **Inspect a device** — Details page shows every flow, the live legs (IPs and ports), the SDP-derived format and bitrate, and lets you edit the alias or the multicast IP per leg. Duplicate multicasts are highlighted across the whole list so you can find clashing senders at a glance.
-- **Replace a device** — Forget the old one (releases its multicast leases, removes its DNS entry). Plug the new one in. It'll show up automatically.
-- **Spot a problem** — the right-hand nav has a live Dev / TX / RX counter that goes yellow / red when something becomes unreachable, visible from every page.
-
-
 ## What you need
 
 A working NMOS Registry on the network. Crosspoint is tested against [nmos-cpp](https://github.com/sony/nmos-cpp).
@@ -142,10 +134,10 @@ flowchart TD
 
 ## Planned
 
-- Virtual senders and receivers
-- IS-07 (works today with easy-nmos-node)
-- IS-08 (in progress)
+- IS-07 
+- IS-08 
 - BCP-008
+- IS-12
 - IS-13
 
 
