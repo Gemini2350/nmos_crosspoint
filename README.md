@@ -88,7 +88,8 @@ If you don't have one yet, the ready-made image from rhastie is a fast way to ge
 
 Via Docker Registry:
 
-```docker run -d \
+```
+docker run -d \
   --restart unless-stopped \
   -p 80:80 \
   --name nmos_crosspoint \
