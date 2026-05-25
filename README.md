@@ -86,6 +86,17 @@ If you don't have one yet, the ready-made image from rhastie is a fast way to ge
 
 ## Installation
 
+Via Docker Registry:
+
+```docker run -d \
+  --restart unless-stopped \
+  -p 80:80 \
+  --name nmos_crosspoint \
+  gemini2350/nmos_crosspoint-v3:latest
+```
+
+Via File Copy:
+
 Copy Files to your Docker Host
 
 ```shell
