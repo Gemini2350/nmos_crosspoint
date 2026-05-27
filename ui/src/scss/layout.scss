@@ -36,13 +36,16 @@
             display: flex;
             flex-direction: column;
             gap: 2px;
-            // Pull the whole block to the left (and trim padding) so it
-            // doesn't visually overweight the nav. The 20px translateX
-            // lives outside the layout flow so it doesn't affect the
-            // surrounding menu items.
-            margin: 0.55rem 0.35rem 0.4rem 0.3rem;
+            // Position the counter box between the two extremes we tried
+            // earlier: the original (`translateX(-10px)` + `margin-left:0.3rem`)
+            // pulled it noticeably left of the icon column; removing the
+            // transform entirely with `margin-left:0.5rem` pushed it
+            // noticeably right. Midway: `margin-left:0.4rem` plus a small
+            // `translateX(-5px)` lands ~1–2 px right of zero — visually
+            // centred under the icon column below.
+            margin: 0.55rem 0.35rem 0.4rem 0.4rem;
             padding: 7px 8px;
-            transform: translateX(-20px);
+            transform: translateX(-5px);
             background-color: theme('colors.base-300');
             border-radius: 8px;
             // Finer typography — slightly smaller, lighter weight, and

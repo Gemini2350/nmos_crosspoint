@@ -61,8 +61,8 @@ Per-vendor recipes for the "Open device Web UI" link on the Details page. Profil
 
 ![Detected devices with resolved Web-UI links](Screenshots/Screenshot%202026-05-22%20at%2001.36.51.png)
 
-**Push Names to DNS**
-Setup Virtual Senders by adding their SDP. An Sender_ID is automatically generated. Connections are only Visible in Nmos-Crosspoint as the Sender_ID is only known to NMOS Crosspoint
+**Virtual Senders**
+Setup Virtual Senders by adding their SDP. An Sender_ID is automatically generated. 
 
 ![Setup Virtual Senders](Screenshots/Screenshot%202026-05-22%20at%2009.58.22.png)
 
@@ -85,6 +85,21 @@ If you don't have one yet, the ready-made image from rhastie is a fast way to ge
 
 
 ## Installation
+
+Via Docker Registry:
+
+```
+docker run -d \
+  --restart unless-stopped \
+  --network host \
+  --name nmos-crosspoint_v3 \
+  --hostname nmos-crosspoint_v3 \
+  -v "$(pwd)/server/config:/nmos-crosspoint/server/config" \
+  -v "$(pwd)/server/state:/nmos-crosspoint/server/state" \
+  gemini2350/nmos-crosspoint_v3:latest
+```
+
+Via File Copy:
 
 Copy Files to your Docker Host
 

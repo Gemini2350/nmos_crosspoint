@@ -32,11 +32,17 @@
       domain: string;
       insecureTLS: boolean;
     }
+    interface VirtualNodeCfg {
+      enabled: boolean;
+      deviceId?: string;
+      nodeId?: string;
+    }
     interface SetupConfig {
       registry: { ip:string, port:number };
       acceptableGmid: string;
       vendorProfiles: VendorProfile[];
       virtualSenders: VirtualSender[];
+      virtualNode: VirtualNodeCfg;
       multicastRange: string;
       autoMulticast: { enabled: boolean, reconnectReceiversOnSenderChange?: boolean };
       autoActivateInactiveSender: boolean;
@@ -52,6 +58,7 @@
       acceptableGmid: "",
       vendorProfiles: [],
       virtualSenders: [],
+      virtualNode: { enabled: true },
       multicastRange: "",
       autoMulticast: { enabled: false, reconnectReceiversOnSenderChange: false },
       autoActivateInactiveSender: false,
@@ -67,6 +74,7 @@
     let formGmid:string = "";
     let formProfiles:VendorProfile[] = [];
     let formVirtualSenders:VirtualSender[] = [];
+    let formVirtualNodeEnabled:boolean = true;
     let formAutoMulticastEnabled:boolean = false;
     let formReconnectReceivers:boolean = false;
     let formAutoActivateSender:boolean = false;
@@ -94,33 +102,10 @@
     let formDnsDomain:string      = "local";
     let formDnsInsecureTLS:boolean = true;
 
-    // Live preview of detected devices for the vendor table — includes the
-    // resulting Web-UI link so the operator can verify the profile's
-    // protocol/port/path produce the URL they actually expect.
+    // Live preview of detected devices for the vendor table — the actual
+    // list (label / match / url per node) is now built server-side and shipped
+    // as crosspointState.detectedDevices. The UI just renders what arrives.
     let detectedDevices:Array<{ id:string, label:string, match:string, url:string }> = [];
-
-    function buildDeviceUrl(profile:VendorProfile | null, hrefStr:string):string {
-      try{
-        if(!hrefStr){ return ""; }
-        let u = new URL(hrefStr);
-        let host = u.hostname;
-        if(profile){
-          let proto = (profile.protocol === "https") ? "https" : "http";
-          let port = parseInt(""+profile.port);
-          if(isNaN(port) || port <= 0 || port > 65535){
-            port = (proto === "https") ? 443 : 80;
-          }
-          let path = (typeof profile.path === "string" && profile.path) ? profile.path : "/";
-          if(!path.startsWith("/")){ path = "/" + path; }
-          let portSuffix = ((proto === "http" && port === 80) || (proto === "https" && port === 443))
-              ? "" : (":" + port);
-          return proto + "://" + host + portSuffix + path;
-        }
-        // No profile matched — fall back to whatever the NMOS node advertises.
-        return u.protocol + "//" + u.host + "/";
-      }catch(e){}
-      return "";
-    }
 
     let dirty = false;
     let saving = false;
@@ -128,16 +113,16 @@
     let saveError = "";
 
     let sync:Subject<any>;
-    let syncNmos:Subject<any>;
     let syncLeases:Subject<any>;
     let syncCrosspoint:Subject<any>;
     let syncDnsPushed:Subject<any>;
-    let nmosState:any = { nodes:{}, devices:{}, senders:{}, receivers:{} };
-    let crosspointState:any = { devices:[] };
     // Live inventory of DNS entries currently published to pfSense
     let dnsPushedSnapshot:any = { entries: [], updatedAt: "" };
 
     // Live lease inventory snapshot: { leases:{[id]:Lease}, stats:..., updatedAt:string }
+    // The server enriches each lease with `liveStatus` ("active" / "inactive" /
+    // "missing") and `bitrate`, so the UI does not need to walk the NMOS state
+    // or the crosspoint state any more.
     let leaseSnapshot:any = { leases:{}, stats:{}, updatedAt:"" };
     let inventoryFilter:string = "";
     let inventoryCategoryFilter:string = "";  // "" / "audio" / "video"
@@ -154,6 +139,7 @@
             formGmid = obj.acceptableGmid || "";
             formProfiles = Array.isArray(obj.vendorProfiles) ? obj.vendorProfiles.map((p:any) => ({...p})) : [];
             formVirtualSenders = Array.isArray(obj.virtualSenders) ? obj.virtualSenders.map((v:any) => ({...v})) : [];
+            formVirtualNodeEnabled = (obj.virtualNode && typeof obj.virtualNode.enabled === "boolean") ? obj.virtualNode.enabled : true;
             formAutoMulticastEnabled = !!(obj.autoMulticast && obj.autoMulticast.enabled);
             // `reconnectReceiversOnSenderChange` default is now FALSE, so we
             // take the stored value as-is (no "!== false" magic).
@@ -180,26 +166,21 @@
               formDnsInsecureTLS = obj.dnsPush.insecureTLS !== false;
             }
           }
-          recomputeDetected();
         }
-      });
-      syncNmos = ServerConnector.sync("nmos");
-      syncNmos.subscribe((obj:any)=>{
-        if(obj){ scheduleStateUpdate("nmos", obj); }
       });
       syncLeases = ServerConnector.sync("multicastLeases");
       syncLeases.subscribe((obj:any)=>{
         if(obj){ leaseSnapshot = obj; }
       });
-      // Crosspoint state carries the per-flow bitrate the worker thread
-      // computes from each sender's NMOS flow. We use it to surface the
-      // bitrate column in the lease inventory. Patches arrive in bursts on
-      // big systems — coalesce them via rAF so the reactive `$:` chain
-      // (buildBitrateIndex + recomputeLeaseRows + recomputeDetected) runs
-      // at most once per frame.
+      // The crosspoint sync carries the precomputed detectedDevices preview
+      // (label / matched-profile / Web-UI URL per NMOS node). Every other
+      // derived field the Setup page used to compute on the fly is now
+      // attached server-side, so the UI only has to render.
       syncCrosspoint = ServerConnector.sync("crosspoint");
       syncCrosspoint.subscribe((obj:any)=>{
-        if(obj){ scheduleStateUpdate("crosspoint", obj); }
+        if(obj){
+          detectedDevices = Array.isArray(obj.detectedDevices) ? obj.detectedDevices : [];
+        }
       });
       // Inventory of currently-pushed DNS entries (updated by the
       // DnsPushService whenever a push, update or remove succeeds).
@@ -212,8 +193,6 @@
     onDestroy(() => {
       try{sync && sync.unsubscribe();}catch(e){}
       try{ServerConnector.unsync("setupConfig");}catch(e){}
-      try{syncNmos && syncNmos.unsubscribe();}catch(e){}
-      try{ServerConnector.unsync("nmos");}catch(e){}
       try{syncLeases && syncLeases.unsubscribe();}catch(e){}
       try{ServerConnector.unsync("multicastLeases");}catch(e){}
       try{syncCrosspoint && syncCrosspoint.unsubscribe();}catch(e){}
@@ -222,45 +201,10 @@
       try{ServerConnector.unsync("dnsPushed");}catch(e){}
     });
 
-    // Coalesce rapid sync patches into one Svelte update per animation
-    // frame. The crosspoint and nmos SyncObjects deliver one patch per
-    // upstream event, which on a big NMOS registry adds up to dozens per
-    // second. Without coalescing every patch ran buildBitrateIndex(),
-    // recomputeLeaseRows() and recomputeDetected() synchronously — easily
-    // multi-millisecond on big states. With rAF batching the same handler
-    // runs at most ~60Hz.
-    let _pendingState: { nmos?:any, crosspoint?:any } = {};
-    let _stateScheduled = false;
-    function scheduleStateUpdate(kind:"nmos"|"crosspoint", val:any){
-      _pendingState[kind] = val;
-      if(_stateScheduled) return;
-      _stateScheduled = true;
-      const run = () => {
-        _stateScheduled = false;
-        let p = _pendingState;
-        _pendingState = {};
-        // Reassign — Svelte's `$:` reactive block on (formProfiles,
-        // nmosState, recomputeDetected) below picks it up exactly once
-        // per tick, no matter how many WS patches landed this frame.
-        if(p.nmos !== undefined){
-          nmosState = p.nmos;
-        }
-        if(p.crosspoint !== undefined){
-          crosspointState = p.crosspoint;
-        }
-      };
-      if(typeof requestAnimationFrame === "function"){
-        requestAnimationFrame(run);
-      }else{
-        setTimeout(run, 16);
-      }
-    }
-
     function markDirty(){
       dirty = true;
       savedFlash = false;
       saveError = "";
-      recomputeDetected();
     }
 
     function resetForm(){
@@ -269,6 +213,7 @@
       formGmid = serverState.acceptableGmid || "";
       formProfiles = Array.isArray(serverState.vendorProfiles) ? serverState.vendorProfiles.map((p:any)=>({...p})) : [];
       formVirtualSenders = Array.isArray((serverState as any).virtualSenders) ? (serverState as any).virtualSenders.map((v:any)=>({...v})) : [];
+      formVirtualNodeEnabled = (serverState.virtualNode && typeof serverState.virtualNode.enabled === "boolean") ? serverState.virtualNode.enabled : true;
       formAutoMulticastEnabled = !!(serverState.autoMulticast && serverState.autoMulticast.enabled);
       formReconnectReceivers   = !!(serverState.autoMulticast && (
         (serverState.autoMulticast as any).reconnectReceiversOnSenderChange ??
@@ -288,7 +233,6 @@
       }
       dirty = false;
       saveError = "";
-      recomputeDetected();
     }
 
     function save(){
@@ -333,6 +277,7 @@
         acceptableGmid: formGmid.trim(),
         vendorProfiles: formProfiles,
         virtualSenders: formVirtualSenders.map(v => ({ id: v.id, name: v.name, sdp: v.sdp })),
+        virtualNode: { enabled: formVirtualNodeEnabled },
         multicastRange: formMulticastRange.trim(),
         autoMulticast: {
           enabled: formAutoMulticastEnabled,
@@ -487,55 +432,10 @@
     }
 
 
-    // ----- Detected-device preview helpers -----
-    function splitLabels(s:string):string[] {
-      if(!s){ return []; }
-      return s.split(",").map(x => x.trim().toLowerCase()).filter(x => x.length > 0);
-    }
-    function matchProfile(profile:VendorProfile, label:string, description:string):boolean {
-      let needles = splitLabels(profile.labels);
-      if(needles.length === 0){ return false; }
-      let hay = (label + " " + description).toLowerCase();
-      for(let n of needles){
-        if(hay.includes(n)) return true;
-      }
-      return false;
-    }
-
-    function recomputeDetected(){
-      try{
-        let nodes = nmosState && nmosState.nodes ? nmosState.nodes : {};
-        let arr:Array<{ id:string, label:string, match:string, url:string }> = [];
-        for(let nodeId in nodes){
-          let n = nodes[nodeId];
-          if(!n){ continue; }
-          let label = n.label || nodeId;
-          let description = n.description || "";
-
-          let matched:VendorProfile | null = null;
-          let matchName = "";
-          for(let p of formProfiles){
-            if(matchProfile(p, label, description)){
-              matched = p;
-              matchName = p.name || p.id;
-              break;
-            }
-          }
-          let url = buildDeviceUrl(matched, n.href || "");
-          arr.push({ id: nodeId, label, match: matchName, url });
-        }
-        arr.sort((a,b)=>(a.label||"").localeCompare(b.label||""));
-        detectedDevices = arr;
-      }catch(e){
-        detectedDevices = [];
-      }
-    }
-
-    // recompute on profile/state changes
-    $: { formProfiles; nmosState; recomputeDetected(); }
-
-
     // ----- Lease inventory derived state -----
+    // Each lease is already enriched server-side with liveStatus + bitrate
+    // (see server.ts:getMulticastLeaseSnapshot), so the UI just filters and
+    // sorts the snapshot. No NMOS / crosspoint walks happen on the client.
     interface LeaseRow {
       senderId: string;
       deviceLabel: string;
@@ -545,48 +445,17 @@
       secondaryIp: string;
       port: number;
       createdAt: string;
-      // Bitrate as supplied by the crosspoint worker (Mbps). May be 0 / null
-      // for senders that aren't currently in the crosspoint state.
       bitrate: any;
-      // Live state from NMOS, looked up on every recompute.
-      // "active":   sender is in the NMOS registry and master_enable=true
-      // "inactive": sender is in the NMOS registry but master_enable=false
-      // "missing":  sender ID isn't present in the NMOS registry at all
       liveStatus: "active" | "inactive" | "missing";
     }
     let leaseRows:LeaseRow[] = [];
-    // Recompute whenever leases, filter, NMOS state, or crosspoint state change.
-    $: leaseRows = recomputeLeaseRows(leaseSnapshot, inventoryFilter, inventoryCategoryFilter, nmosState, crosspointState);
+    $: leaseRows = recomputeLeaseRows(leaseSnapshot, inventoryFilter, inventoryCategoryFilter);
 
-    // Build a fast { senderUuid → bitrate } map from the crosspoint state.
-    // Crosspoint flow ids are namespaced as "nmos_<uuid>"; the lease snapshot
-    // keys are raw UUIDs.
-    function buildBitrateIndex(cp:any): { [uuid:string]: any } {
-      let out: { [uuid:string]: any } = {};
-      try{
-        let devs = (cp && Array.isArray(cp.devices)) ? cp.devices : [];
-        for(let d of devs){
-          if(!d || !d.senders) continue;
-          for(let type of Object.keys(d.senders)){
-            let arr = d.senders[type];
-            if(!Array.isArray(arr)) continue;
-            for(let s of arr){
-              if(!s || typeof s.id !== "string") continue;
-              if(!s.id.startsWith("nmos_")) continue;
-              out[s.id.slice(5)] = s.bitrate;
-            }
-          }
-        }
-      }catch(e){}
-      return out;
-    }
-
-    function recomputeLeaseRows(snap:any, filterStr:string, catFilterStr:string, nmos:any, cp:any):LeaseRow[]{
+    function recomputeLeaseRows(snap:any, filterStr:string, catFilterStr:string):LeaseRow[]{
       let arr:LeaseRow[] = [];
       let raw = snap && snap.leases ? snap.leases : {};
       let needle = (filterStr || "").toLowerCase();
       let catFilter = catFilterStr || "";
-      let bitrateByUuid = buildBitrateIndex(cp);
       for(let id in raw){
         let l = raw[id];
         if(!l) continue;
@@ -595,14 +464,6 @@
           let hay = ((l.deviceLabel||"") + " " + id + " " + (l.primaryIp||"") + " " + (l.secondaryIp||"")).toLowerCase();
           if(!hay.includes(needle)) continue;
         }
-        // Look up the live state in the NMOS sender table (keyed by raw UUID).
-        let liveStatus:"active"|"inactive"|"missing" = "missing";
-        try{
-          let nmosSender = nmos?.senders?.[id];
-          if(nmosSender){
-            liveStatus = (nmosSender.subscription && nmosSender.subscription.active) ? "active" : "inactive";
-          }
-        }catch(e){}
         arr.push({
           senderId: id,
           deviceLabel: l.deviceLabel || "",
@@ -612,13 +473,12 @@
           secondaryIp: l.secondaryIp || "",
           port: l.port || 0,
           createdAt: l.createdAt || "",
-          bitrate: bitrateByUuid[id],
-          liveStatus
+          bitrate: l.bitrate,
+          liveStatus: l.liveStatus || "missing"
         });
       }
       arr.sort((a,b) => {
         if(a.category !== b.category) return a.category.localeCompare(b.category);
-        // sort by uint32 of primary IP within a category
         return ipCompare(a.primaryIp, b.primaryIp);
       });
       return arr;
@@ -1081,12 +941,36 @@
     <section class="setup-section">
       <h3>Virtual Senders</h3>
       <p class="setup-section-hint">
-        Operator-defined senders that don't exist in any NMOS registry. Each entry stores a raw SDP
-        you paste below. All virtual senders are grouped under a synthetic <strong>Virtual Device</strong>
-        node and are immediately available on the Crosspoint page. When a receiver is connected to
-        a virtual sender, the pasted SDP is sent as its <code>transport_file</code> — no IS-05
-        PATCH on a sender side, since there is no sender side.
+        Operator-defined senders for devices that don't speak NMOS themselves &mdash; paste their SDPs
+        below and NMOS Crosspoint exposes itself as an IS-04 <strong>Node</strong> and publishes each
+        entry as a real NMOS sender (with full Source / Flow / Sender records and an IS-05
+        <code>transport_file</code> endpoint). Once registered, the senders show up in <em>every</em>
+        NMOS-aware controller on the network, not just here. Heartbeats keep the Node alive against
+        the configured registry; switching registries deregisters the old one cleanly.
       </p>
+      <p class="setup-section-hint">
+        Each sender keeps the same UUID across restarts, so receivers stay bound. The destination IP
+        comes from the SDP exactly as you typed it &mdash; virtual senders are read-only over IS-05,
+        so the multicast-edit pencil is hidden for them on the Details page.
+      </p>
+
+      <div class="setup-form" style="margin-bottom:14px;">
+        <label class="label cursor-pointer gap-3" style="justify-content:flex-start;">
+          <span class="label-text">Enable Virtual NMOS Node</span>
+          <input type="checkbox" class="toggle" bind:checked={formVirtualNodeEnabled} on:change={markDirty} />
+        </label>
+      </div>
+
+      {#if !formVirtualNodeEnabled}
+        <div class="alert alert-warning setup-alert" style="margin-bottom:12px;">
+          <Icon src={ExclamationTriangle} />
+          <span>
+            Virtual Node disabled &mdash; the senders listed below stay in <code>settings.json</code>
+            but are NOT registered with the NMOS registry. Re-enable to make them visible to
+            controllers and receivers again.
+          </span>
+        </div>
+      {/if}
 
       {#each formVirtualSenders as v (v.id)}
         <details class="virtual-sender-row">

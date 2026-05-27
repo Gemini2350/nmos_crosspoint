@@ -13,21 +13,6 @@
     import OverlayMenuService from "../lib/OverlayMenu/OverlayMenuService";
 
 
-    // ----- Media type -> Display name -----
-    let mediaTypes:any = {
-      "video/raw" : "RAW Video",
-      "video/jxsv" : "JPEG-XS Video",
-      "video/colibri" : "Colibri Video",
-      "audio/L16" : "16 Bit LPCM",
-      "audio/L24" : "24 Bit LPCM",
-      // L32 is a 32-bit container; AES67 carries 24-bit LPCM samples
-      // padded into the upper 24 bits of each word, so we label it the
-      // same as L24 to match operator expectation.
-      "audio/L32" : "24 Bit LPCM",
-      "audio/AM824" : "ST2110-31 AES3",
-      "video/smpte291":"ANC"
-    }
-
     // Same icon set as Crosspoint sender side
     function getFlowTypeIcon(type:string){
       switch(type){
@@ -60,14 +45,12 @@
     };
 
     // ----- Source data -----
+    // The crosspoint sync carries everything we need — devices, senders,
+    // receivers, plus the server-side enrichment (legs, codecs, node label,
+    // gmid, device URL, connected-sender label). The nmos sync is only used
+    // for the raw SDP viewer (sendersManifestDetail._RAWSDP).
     let sourceState:any = { devices: [] };
     let nmosState:any = {
-        devices: {},
-        sources: {},
-        senders: {},
-        receivers: {},
-        flows: {},
-        nodes: {},
         sendersManifestDetail :{}
     };
 
@@ -93,6 +76,11 @@
       // Raw SDP carried directly on the flow for virtual senders (no NMOS
       // manifest fetch available). Empty string for normal NMOS senders.
       sdp:string;
+      // True when this sender lives on our own virtual NMOS device. The
+      // multicast / port edit pencil is suppressed because PATCH /staged
+      // returns 405 for virtual senders (their address comes from the
+      // pasted SDP, not from IS-05).
+      isVirtual:boolean;
     }
     interface ReceiverRow {
       id:string;
@@ -126,6 +114,11 @@
       gmidLocked:boolean;
       // Link to the device's web UI (derived from the NMOS Node's href). "" if unknown.
       deviceUrl:string;
+      // True for our own virtual NMOS device (settings.virtualNode.deviceId).
+      // Used by the template to skip controls that don't make sense here
+      // (Forget would just trigger an immediate re-register; multicast
+      // editing is rejected with 405).
+      isVirtual:boolean;
       senders:SenderRow[];
       receivers:ReceiverRow[];
     }
@@ -141,33 +134,6 @@
     // Acceptable PTP GMID — comes from the Setup page via the `setupConfig` sync.
     // Used to colour the device status dot green (match) vs. yellow (mismatch).
     let acceptableGmid:string = "";
-
-    // Vendor profiles — also from the setupConfig sync. Determine how the
-    // "open device web UI" link is built (protocol/port/path) per vendor.
-    interface VendorProfile {
-      id: string;
-      name: string;
-      // comma-separated list of case-insensitive substrings
-      labels: string;
-      protocol: string;
-      port: number | string;
-      path: string;
-    }
-    let vendorProfiles:VendorProfile[] = [];
-
-    function _splitVendorLabels(s:string):string[] {
-      if(!s){ return []; }
-      return s.split(",").map(x => x.trim().toLowerCase()).filter(x => x.length > 0);
-    }
-    function _matchVendorProfile(profile:VendorProfile, label:string, description:string):boolean {
-      let needles = _splitVendorLabels(profile.labels);
-      if(needles.length === 0){ return false; }
-      let hay = ((label||"") + " " + (description||"")).toLowerCase();
-      for(let n of needles){
-        if(hay.includes(n)) return true;
-      }
-      return false;
-    }
 
     // Normalise GMIDs so different separator / case styles compare cleanly.
     function normaliseGmid(v:string){
@@ -188,19 +154,6 @@
       return "warning";
     }
 
-
-    function renderCodecs(list:string[]){
-      let codec:string[] = [];
-      if(!list){return "";}
-      list.forEach((c)=>{
-        if(mediaTypes.hasOwnProperty(c)){
-          codec.push(mediaTypes[c]);
-        }else{
-          codec.push(c);
-        }
-      });
-      return codec.join(", ");
-    }
 
     function renderBitrate(bitrate:any){
       // bitrate may be number (legacy) or { v:number, hint:string }
@@ -225,184 +178,6 @@
       return v.toFixed(1) + " Mbit/s";
     }
 
-    // Build per-leg display info. IS-05 `/active` is the authoritative source
-    // for what the sender is currently configured to transmit — the SDP may
-    // lag behind (or 404 entirely for inactive senders), so we use IS-05 first
-    // and fall back to the parsed SDP only when no transport_params are known.
-    function getLegsFromManifest(nmosSenderId:string){
-      let legs:Array<{ index:number, dstIp:string, dstPort:string|number, srcIp:string }> = [];
-
-      try{
-        let active = (nmosState as any).senderActiveData ? (nmosState as any).senderActiveData[nmosSenderId] : null;
-        if(active && Array.isArray(active.transport_params) && active.transport_params.length > 0){
-          active.transport_params.forEach((tp:any, index:number)=>{
-            legs.push({
-              index,
-              dstIp: tp && tp.destination_ip ? (""+tp.destination_ip) : "",
-              dstPort: tp && (tp.destination_port !== undefined && tp.destination_port !== null) ? tp.destination_port : "",
-              srcIp: tp && tp.source_ip ? (""+tp.source_ip) : ""
-            });
-          });
-          // Always sort ascending below — drop through, no early return.
-        }
-      }catch(e){}
-
-      // Fallback: parse the SDP manifest (only if IS-05 didn't yield anything)
-      if(legs.length === 0)
-      try{
-        let manifest = nmosState.sendersManifestDetail ? nmosState.sendersManifestDetail[nmosSenderId] : null;
-        if(manifest && Array.isArray(manifest.media) && manifest.media.length > 0){
-          manifest.media.forEach((media:any, index:number)=>{
-            let dstIp = "";
-            let srcIp = "";
-            let port:string|number = "";
-            try{
-              if(media.sourceFilter){
-                dstIp = media.sourceFilter.destAddress || "";
-                srcIp = media.sourceFilter.srcList || "";
-              }
-              if(!dstIp && media.connection && media.connection.ip){
-                dstIp = (""+media.connection.ip).split("/")[0];
-              }
-              if(media.port !== undefined && media.port !== null){
-                port = media.port;
-              }
-            }catch(e){}
-            legs.push({ index, dstIp, dstPort:port, srcIp });
-          });
-        }
-      }catch(e){}
-
-      // Always render legs in ascending index order. Some devices return the
-      // IS-05 transport_params or SDP media entries in a non-natural order,
-      // which made the edit form appear with Leg 2 above Leg 1.
-      legs.sort((a, b) => a.index - b.index);
-      return legs;
-    }
-
-
-    // Codec name from a sender's SDP manifest. Maps the canonical RTP names
-    // (L16/L24/AM824/raw/jxsv/smpte291…) to human-readable labels.
-    function getCodecFromManifest(nmosSenderId:string){
-      if(!nmosSenderId){ return ""; }
-      try{
-        let manifest = nmosState.sendersManifestDetail ? nmosState.sendersManifestDetail[nmosSenderId] : null;
-        if(!manifest || !Array.isArray(manifest.media) || manifest.media.length === 0){ return ""; }
-        let labels:string[] = [];
-        manifest.media.forEach((m:any)=>{
-          if(!m || !Array.isArray(m.rtp) || m.rtp.length === 0){ return; }
-          let codec = ("" + (m.rtp[0].codec || "")).toUpperCase();
-          let pretty = codec;
-          switch(codec){
-            case "L16":      pretty = "16 Bit LPCM"; break;
-            case "L24":      pretty = "24 Bit LPCM"; break;
-            // L32 carries 24-bit LPCM samples padded into a 32-bit container.
-            case "L32":      pretty = "24 Bit LPCM"; break;
-            case "AM824":    pretty = "ST2110-31 AES3"; break;
-            case "RAW":      pretty = "RAW Video"; break;
-            case "JXSV":     pretty = "JPEG-XS Video"; break;
-            case "SMPTE291": pretty = "ANC"; break;
-            case "VC2":      pretty = "VC-2"; break;
-            default:
-              if(codec){ pretty = codec; }
-              else { pretty = ""; }
-          }
-          if(pretty && !labels.includes(pretty)){
-            labels.push(pretty);
-          }
-        });
-        return labels.join(", ");
-      }catch(e){}
-      return "";
-    }
-
-
-    // Helper: build a tiny "view" of the sender a receiver is connected to.
-    // Returns null if the receiver isn't connected or the sender is unknown.
-    function lookupConnectedSender(connectedFlowId:string){
-      if(!connectedFlowId || !connectedFlowId.startsWith("nmos_")){ return null; }
-      let nmosId = connectedFlowId.substring(5);
-      let nmosSender:any = nmosState.senders ? nmosState.senders[nmosId] : null;
-      if(!nmosSender){ return null; }
-      // Find a friendly label — fall back to the NMOS label or id.
-      let label = nmosSender.label || nmosId;
-      try{
-        let dev = nmosState.devices ? nmosState.devices[nmosSender.device_id] : null;
-        if(dev && dev.label){
-          label = dev.label + " / " + label;
-        }
-      }catch(e){}
-      return { nmosId, label, nmosSender };
-    }
-
-
-    // Derive a clickable URL pointing at the device's web UI from the NMOS
-    // node's `href` field. We keep the scheme/host/port the node advertises
-    // and drop the API path so the link opens the device's root page.
-    //
-    // If a matching Vendor Profile is configured (Setup page), we override
-    // protocol/port/path with the profile's values but keep the host (IP)
-    // from the node's href.
-    function getDeviceUrlFromNode(nodeId:string){
-      try{
-        let node = nmosState.nodes ? nmosState.nodes[nodeId] : null;
-        if(!node || !node.href){ return ""; }
-        let u = new URL(""+node.href);
-        let host = u.hostname; // bare host (no port)
-
-        // Try vendor profiles first
-        let label = node.label || "";
-        let description = node.description || "";
-        for(let profile of vendorProfiles){
-          if(_matchVendorProfile(profile, label, description)){
-            let proto = (profile.protocol === "https") ? "https" : "http";
-            let port = parseInt(""+profile.port);
-            if(isNaN(port) || port <= 0 || port > 65535){
-              port = (proto === "https") ? 443 : 80;
-            }
-            let path = (typeof profile.path === "string" && profile.path) ? profile.path : "/";
-            if(!path.startsWith("/")){ path = "/" + path; }
-            // Drop the default port from the URL for nicer display
-            let portSuffix = ((proto === "http" && port === 80) || (proto === "https" && port === 443))
-                ? "" : (":" + port);
-            return proto + "://" + host + portSuffix + path;
-          }
-        }
-
-        // Fallback: use whatever the NMOS node advertises (scheme + host + port)
-        return u.protocol + "//" + u.host + "/";
-      }catch(e){}
-      return "";
-    }
-
-
-    // Extract the PTP Grand-Master ID from the NMOS node's `clocks` array.
-    // The NMOS node resource exposes one or more clock entries; for ST 2110 we
-    // want a `ref_type === "ptp"` entry. Returns "" if no PTP clock is present.
-    function getGmidFromNode(nodeId:string){
-      try{
-        let node = nmosState.nodes ? nmosState.nodes[nodeId] : null;
-        if(!node || !Array.isArray(node.clocks)){
-          return { gmid:"", locked:false };
-        }
-        // Prefer a PTP clock that reports locked:true
-        let firstPtp:any = null;
-        for(let clk of node.clocks){
-          if(clk && clk.ref_type === "ptp"){
-            if(!firstPtp){ firstPtp = clk; }
-            if(clk.locked && clk.gmid){
-              return { gmid: ("" + clk.gmid).toUpperCase(), locked: true };
-            }
-          }
-        }
-        if(firstPtp && firstPtp.gmid){
-          return { gmid: ("" + firstPtp.gmid).toUpperCase(), locked: !!firstPtp.locked };
-        }
-      }catch(e){}
-      return { gmid:"", locked:false };
-    }
-
-
     function rebuild(){
       // ipCount[legIndex][ip] = count
       let ipCount:{[legIndex:number]:{[ip:string]:number}} = {};
@@ -414,36 +189,6 @@
       let formatTokens = filter.searchFormat ? getSearchTokens(filter.searchFormat) : [];
       let ipTokens = filter.searchIp ? getSearchTokens(filter.searchIp) : [];
 
-      // ----- Pre-pass: build a global sender lookup so receivers can find their
-      // connected sender even when that sender lives on a different device that
-      // gets processed later in the main pass. -----
-      let senderRowById:{[id:string]:SenderRow} = {};
-      let senderTypesGlobal = ["video","audio","data","audiochannel","mqtt","websocket","unknown"];
-      cpDevices.forEach((dev:any)=>{
-        senderTypesGlobal.forEach((t)=>{
-          if(dev.senders && Array.isArray(dev.senders[t])){
-            dev.senders[t].forEach((s:any)=>{
-              let nmosId = (typeof s.id === "string" && s.id.startsWith("nmos_")) ? s.id.substring(5) : "";
-              senderRowById[s.id] = {
-                id: s.id,
-                nmosId,
-                type: s.type,
-                name: s.name,
-                alias: s.alias || s.name,
-                active: !!s.active,
-                available: !!s.available,
-                manifestOk: !!s.manifestOk,
-                format: s.format || "",
-                codec: renderCodecs(s.capabilities && s.capabilities.mediaTypes ? s.capabilities.mediaTypes : []),
-                bitrate: s.bitrate,
-                legs: nmosId ? getLegsFromManifest(nmosId) : [],
-                sdp: (typeof s.sdp === "string") ? s.sdp : ""
-              };
-            });
-          }
-        });
-      });
-
       cpDevices.forEach((dev:any)=>{
         let flowTypeList = ["video","audio","data","audiochannel","mqtt","websocket","unknown"];
         let allSenders:any[] = [];
@@ -452,71 +197,23 @@
             allSenders = allSenders.concat(dev.senders[t]);
           }
         });
-        // Pre-collect receivers too so we can resolve the NMOS device id even
-        // when the device only exposes receivers (and so we don't skip such
-        // devices entirely).
-        let allReceiversPreview:any[] = [];
+        let allReceivers:any[] = [];
         flowTypeList.forEach((t)=>{
           if(dev.receivers && Array.isArray(dev.receivers[t])){
-            allReceiversPreview = allReceiversPreview.concat(dev.receivers[t]);
+            allReceivers = allReceivers.concat(dev.receivers[t]);
           }
         });
-        if(allSenders.length === 0 && allReceiversPreview.length === 0){
+        if(allSenders.length === 0 && allReceivers.length === 0){
           return;
         }
 
-        // Look up the NMOS node label to build a "Node - Device" combined label
-        let nmosDevId = "";
-        if(typeof dev.id === "string"){
-          if(dev.id.startsWith("nmos_")){
-            nmosDevId = dev.id.substring(5);
-          }else if(dev.id.startsWith("nmosgrp_")){
-            // Try senders first
-            for(let s of allSenders){
-              if(typeof s.id === "string" && s.id.startsWith("nmos_")){
-                let snd = nmosState.senders ? nmosState.senders[s.id.substring(5)] : null;
-                if(snd && snd.device_id){
-                  nmosDevId = snd.device_id;
-                  break;
-                }
-              }
-            }
-            // Fallback to receivers (for receiver-only devices)
-            if(!nmosDevId){
-              for(let r of allReceiversPreview){
-                if(typeof r.id === "string" && r.id.startsWith("nmos_")){
-                  let rcv = nmosState.receivers ? nmosState.receivers[r.id.substring(5)] : null;
-                  if(rcv && rcv.device_id){
-                    nmosDevId = rcv.device_id;
-                    break;
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        let nodeLabel = "";
-        let nodeId = "";
-        try{
-          if(nmosDevId && nmosState.devices && nmosState.devices[nmosDevId]){
-            nodeId = nmosState.devices[nmosDevId].node_id || "";
-            let nd = nodeId && nmosState.nodes ? nmosState.nodes[nodeId] : null;
-            if(nd && nd.label){
-              nodeLabel = nd.label;
-            }
-          }
-        }catch(e){}
-
-        // PTP Grand-Master ID — taken directly from the NMOS node, not from SDP
-        let gmInfo = nodeId ? getGmidFromNode(nodeId) : { gmid:"", locked:false };
-
-        // Web link to the device (e.g. http://192.168.x.x/)
-        let deviceUrl = nodeId ? getDeviceUrlFromNode(nodeId) : "";
-
+        // Server-side enrichment (CrosspointAbstraction.enrichCrosspointState)
+        // already attaches nodeLabel / gmid / deviceUrl per device, and legs /
+        // codec / connectedSenderLabel per flow. No raw NMOS parsing happens
+        // in the UI any more.
+        let nodeLabel:string = dev.nodeLabel || "";
         let deviceAlias = dev.alias || dev.name || "";
         let deviceName = dev.name || deviceAlias;
-        // Suppress node prefix when it duplicates the device name (case-insensitive)
         let sameLabel = !!nodeLabel && (
             nodeLabel.toLowerCase() === deviceAlias.toLowerCase() ||
             nodeLabel.toLowerCase() === deviceName.toLowerCase()
@@ -530,8 +227,7 @@
         // Build sender rows
         let senderRows:SenderRow[] = [];
         allSenders.forEach((s:any)=>{
-          let nmosId = (typeof s.id === "string" && s.id.startsWith("nmos_")) ? s.id.substring(5) : "";
-          let legs = nmosId ? getLegsFromManifest(nmosId) : [];
+          let legs:Array<{ index:number, dstIp:string, dstPort:string|number, srcIp:string }> = Array.isArray(s.legs) ? s.legs : [];
 
           if(s.active){
             legs.forEach((l)=>{
@@ -544,7 +240,7 @@
 
           let row:SenderRow = {
             id: s.id,
-            nmosId,
+            nmosId: (typeof s.id === "string" && s.id.startsWith("nmos_")) ? s.id.substring(5) : "",
             type: s.type,
             name: s.name,
             alias: s.alias || s.name,
@@ -552,10 +248,11 @@
             available: !!s.available,
             manifestOk: !!s.manifestOk,
             format: s.format || "",
-            codec: renderCodecs(s.capabilities && s.capabilities.mediaTypes ? s.capabilities.mediaTypes : []),
+            codec: s.codec || "",
             bitrate: s.bitrate,
             legs,
-            sdp: (typeof s.sdp === "string") ? s.sdp : ""
+            sdp: (typeof s.sdp === "string") ? s.sdp : "",
+            isVirtual: !!s.isVirtual
           };
 
           if(searchTokens.length > 0){
@@ -589,25 +286,7 @@
 
         // ----- Receivers for this device -----
         let receiverRows:ReceiverRow[] = [];
-        allReceiversPreview.forEach((r:any)=>{
-          let connected = r.connectedFlow ? lookupConnectedSender(r.connectedFlow) : null;
-          let connectedSenderId = connected ? ("nmos_" + connected.nmosId) : "";
-          let connectedSenderLabel = connected ? connected.label : "";
-
-          // Look up the connected sender row from the pre-pass map. This works
-          // regardless of which device processing order — fixes the case where
-          // a receiver's sender lives on a device handled after this one.
-          let connectedSenderRow:SenderRow | null = (connectedSenderId && senderRowById[connectedSenderId]) ? senderRowById[connectedSenderId] : null;
-
-          // Legs come from the connected sender's own legs lookup. The
-          // sender row already cached them via getLegsFromManifest, so we
-          // can re-use that directly.
-          let legs:any[] = connectedSenderRow ? connectedSenderRow.legs : (connected ? getLegsFromManifest(connected.nmosId) : []);
-
-          // Codec is sourced from the *connected* sender's SDP (L16/L24/AM824 etc.).
-          // If nothing is currently being received, the codec field stays empty.
-          let codec = connected ? getCodecFromManifest(connected.nmosId) : "";
-
+        allReceivers.forEach((r:any)=>{
           let row:ReceiverRow = {
             id: r.id,
             nmosId: (typeof r.id === "string" && r.id.startsWith("nmos_")) ? r.id.substring(5) : "",
@@ -616,12 +295,12 @@
             alias: r.alias || r.name,
             active: !!r.active,
             available: !!r.available,
-            codec,
-            connectedSenderId,
-            connectedSenderLabel,
-            format: connectedSenderRow ? connectedSenderRow.format : "",
-            bitrate: connectedSenderRow ? connectedSenderRow.bitrate : null,
-            legs
+            codec: r.codec || "",
+            connectedSenderId: r.connectedSenderId || "",
+            connectedSenderLabel: r.connectedSenderLabel || "",
+            format: r.format || "",
+            bitrate: r.bitrate,
+            legs: Array.isArray(r.legs) ? r.legs : []
           };
 
           if(searchTokens.length > 0){
@@ -663,9 +342,10 @@
           alias: deviceAlias,
           name: dev.name || "",
           available: !!dev.available,
-          gmid: gmInfo.gmid,
-          gmidLocked: gmInfo.locked,
-          deviceUrl,
+          gmid: dev.gmid || "",
+          gmidLocked: !!dev.gmidLocked,
+          deviceUrl: dev.deviceUrl || "",
+          isVirtual: !!dev.isVirtual,
           senders: senderRows,
           receivers: receiverRows
         });
@@ -757,24 +437,18 @@
         sourceState = obj;
         scheduleRebuild();
       });
+      // We still subscribe to the nmos sync purely for the raw SDP modal:
+      // sendersManifestDetail[*]._RAWSDP is the only field we read directly.
       syncNmos = ServerConnector.sync("nmos")
       syncNmos.subscribe((obj:any)=>{
-        nmosState = obj;
-        scheduleRebuild();
+        if(obj){ nmosState = obj; }
       });
       syncSetup = ServerConnector.sync("setupConfig")
       syncSetup.subscribe((obj:any)=>{
-        if(obj){
-          if(typeof obj.acceptableGmid === "string"){
-            acceptableGmid = obj.acceptableGmid;
-          }
-          if(Array.isArray(obj.vendorProfiles)){
-            vendorProfiles = obj.vendorProfiles;
-            // Rebuild device URLs since vendor matching changed
-            scheduleRebuild();
-            return;
-          }
-          // Re-render so device dots update without waiting for next rebuild().
+        if(obj && typeof obj.acceptableGmid === "string"){
+          acceptableGmid = obj.acceptableGmid;
+          // Re-render so device dots reflect the new threshold without
+          // waiting for the next crosspoint patch.
           deviceList = deviceList;
         }
       });
@@ -1158,7 +832,7 @@
                     <button on:click={()=>openLabelEditor(flow.id, flow.name, flow.alias)} class="btn btn-round btn-hover">
                       <Icon src={Pencil}></Icon>
                     </button>
-                    {#if !flow.available}
+                    {#if !flow.available && !flow.isVirtual}
                       <button class="btn btn-sm det-flow-forget"
                               on:click|stopPropagation={()=>openForgetFlowDialog(dev.id, "sender", flow)}
                               use:OverlayMenuService.tooltip
@@ -1220,13 +894,22 @@
                           {/if}
                         {:else}
                           <span class="det-leg-label">Leg {leg.index+1}:</span>
-                          <button class="btn btn-round det-leg-edit" on:click={()=>startLegEdit(flow.id, leg.index, leg)}
-                                  use:OverlayMenuService.tooltip data-tooltip="Edit Multicast / Port">
-                            <Icon src={Pencil}></Icon>
-                          </button>
+                          {#if !flow.isVirtual}
+                            <button class="btn btn-round det-leg-edit" on:click={()=>startLegEdit(flow.id, leg.index, leg)}
+                                    use:OverlayMenuService.tooltip data-tooltip="Edit Multicast / Port">
+                              <Icon src={Pencil}></Icon>
+                            </button>
+                          {/if}
                           <span class="det-leg-value">{leg.dstIp || "—"}<span class="det-leg-colon">:</span>{leg.dstPort || "—"}</span>
                           {#if isDup}
                             <span class="text-error det-dup-hint" use:OverlayMenuService.tooltip data-tooltip="Multicast IP used by another active sender on the same leg!">DUP</span>
+                          {/if}
+                          {#if flow.isVirtual}
+                            <span class="det-virtual-badge"
+                                  use:OverlayMenuService.tooltip
+                                  data-tooltip="Virtual sender — multicast comes from the SDP pasted on the Setup page. Edit it there, not here.">
+                              Virtual
+                            </span>
                           {/if}
                         {/if}
                       </div>

@@ -38,54 +38,26 @@
     let searchExpandedSenders:string[] = [];
   
     let sync:Subject<any> ;
-    let syncNmos:Subject<any>;
-    let nmosState:any = { nodes:{}, devices:{}, senders:{}, receivers:{} };
 
     let flowTypes = ["video", "audio", "data", "mqtt", "websocket", "audiochannel", "unknown"];
 
 
-    // Build a "Node - Device" label. When the NMOS node label and the device
-    // alias/name are the same (case-insensitive), the prefix is dropped so it
-    // doesn't read like "Anubis - Anubis". Matches the logic on the Details page.
+    // Build a "Node - Device" label. The NMOS node label is already attached
+    // to every device by the server (CrosspointAbstraction.enrichCrosspointState
+    // → dev.nodeLabel), so no client-side NMOS walk is needed — the label
+    // arrives in the same crosspoint patch as the rest of the device, and
+    // there is no flash of "alias only" while a second `nmos` sync is being
+    // applied. When node label and alias match, the prefix is dropped so it
+    // doesn't read like "Anubis - Anubis".
     function deviceDisplayLabel(dev:any){
       let baseAlias = dev?.alias || dev?.name || "";
       let baseName  = dev?.name || baseAlias;
-      try{
-        let nmosDevId = "";
-        if(typeof dev?.id === "string"){
-          if(dev.id.startsWith("nmos_")){
-            nmosDevId = dev.id.substring(5);
-          }else if(dev.id.startsWith("nmosgrp_")){
-            // Look up via any underlying sender/receiver of the group
-            let pickFrom = (groupArr:string[]) => {
-              for(let fid of groupArr){
-                if(typeof fid === "string" && fid.startsWith("nmos_")){
-                  let nmosSenderId = fid.substring(5);
-                  let nmosSender = nmosState.senders?.[nmosSenderId] ?? nmosState.receivers?.[nmosSenderId];
-                  if(nmosSender?.device_id) return nmosSender.device_id;
-                }
-              }
-              return "";
-            };
-            nmosDevId = pickFrom(dev.senderIds || []) || pickFrom(dev.receiverIds || []);
-          }
-        }
-        if(!nmosDevId) return baseAlias;
-        let nd:any = null;
-        try{
-          let nodeId = nmosState.devices?.[nmosDevId]?.node_id;
-          if(nodeId) nd = nmosState.nodes?.[nodeId];
-        }catch(e){}
-        if(!nd || !nd.label) return baseAlias;
-        let nodeLabel = ("" + nd.label).trim();
-        let same = !!nodeLabel && (
+      let nodeLabel = (dev?.nodeLabel || "").trim();
+      if(!nodeLabel) return baseAlias;
+      let same =
           nodeLabel.toLowerCase() === (baseAlias||"").toLowerCase() ||
-          nodeLabel.toLowerCase() === (baseName||"").toLowerCase()
-        );
-        return same ? baseAlias : (nodeLabel + " - " + baseAlias);
-      }catch(e){
-        return baseAlias;
-      }
+          nodeLabel.toLowerCase() === (baseName ||"").toLowerCase();
+      return same ? baseAlias : (nodeLabel + " - " + baseAlias);
     }
 
 
@@ -147,15 +119,6 @@
       sync.subscribe((obj:any)=>{
         sourceState = obj;
         doFilter();
-      });
-      syncNmos = ServerConnector.sync("nmos");
-      syncNmos.subscribe((obj:any)=>{
-        if(obj){
-          nmosState = obj;
-          // Re-render the headers/rows so combined node-device labels refresh.
-          senders   = [...senders];
-          receivers = [...receivers];
-        }
       });
     });
 
@@ -394,10 +357,8 @@
   
     onDestroy(() => {
       sync.unsubscribe();
-          ServerConnector.unsync("crosspoint")
-      try{syncNmos && syncNmos.unsubscribe();}catch(e){}
-      try{ServerConnector.unsync("nmos");}catch(e){}
-      });
+      ServerConnector.unsync("crosspoint");
+    });
 
  
 
@@ -435,9 +396,9 @@
             prepare:true,
             source:srcString,
             destination:dstString
-          }).then((response)=>{
-            let newList = []
-            response.data.connections.forEach((c)=>{
+          }).then((response:any)=>{
+            let newList:any[] = []
+            response.data.connections.forEach((c:any)=>{
               newList.push({
                 srcDev:c.srcDev,
                 src:c.src,
@@ -495,7 +456,7 @@
       updateGlobalTake();
     }
 
-    function cleanPreparedConnections(newList){
+    function cleanPreparedConnections(newList:any[]){
       preparedConnectList = preparedConnectList.filter((c)=>{
         for(let n of newList){
           if(n.dst.id == c.dst.id){
@@ -505,9 +466,9 @@
           }
         }
         return true;
-          
+
       })
-      newList.forEach((n)=>{
+      newList.forEach((n:any)=>{
         preparedConnectList.push(n);
       })
 
@@ -561,11 +522,11 @@
         preview:true,
         source:srcString,
         destination:dstString
-      }).then((response)=>{
+      }).then((response:any)=>{
         previewConnectList = [];
-        response.data.connections.forEach((c)=>{
+        response.data.connections.forEach((c:any)=>{
           previewConnectList.push({src:c.src, dst:c.dst})
-          
+
         })
         receivers = [...receivers]
         updateGlobalTake();
@@ -788,7 +749,7 @@
       }).finally(()=>{})
     }
 
-    function shortCaps(caps){
+    function shortCaps(caps:any){
       return "Limits: Unknown";
     }
 
@@ -806,8 +767,8 @@
     }
 
 
-    let labelModal;
-      let labelModalInput;
+    let labelModal:any;
+      let labelModalInput:any;
       let labelModalId:string = "";
       let labelModalName:string = "";
       let labelModalAlias:string = "";

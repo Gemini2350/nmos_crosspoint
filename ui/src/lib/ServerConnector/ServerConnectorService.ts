@@ -116,6 +116,14 @@ class _ServerConnector {
     pingInterval: any = null;
     pingLastTime = 0;
     pingRoundtrip = -1;
+    // Heartbeat liveness check. Every outgoing ping sets pingPendingSince;
+    // every incoming pong clears it. If pingPendingSince stays set past
+    // pingTimeoutMs, the socket is presumed dead and we force-close so the
+    // existing reconnect path fires (an idle TCP can otherwise sit for
+    // minutes before the browser surfaces the FIN).
+    pingPendingSince = 0;
+    pingTimeoutMs = 25000;
+    pingIntervalMs = 10000;
 
     loading = 0;
 
@@ -265,15 +273,16 @@ class _ServerConnector {
       private connect() {
         this.ws = new WebSocket(this.wsUrl);
         this.ws.onopen = (event) => {
-          
-          
+
+
 
           this.pingLastTime = Date.now();
+          this.pingPendingSince = this.pingLastTime;
           if (this.ws) {
             this.ws.send('ping');
 
             this.connected = true;
-          this.connectionState.next("connected");            
+          this.connectionState.next("connected");
 
             this.reconnectTime = 1;
             setTimeout(() => {
@@ -294,6 +303,8 @@ class _ServerConnector {
           this.connectionState.next("disconnected");
 
           clearInterval(this.pingInterval);
+          this.pingInterval = null;
+          this.pingPendingSince = 0;
           this.reconnectTimeout = setTimeout(() => {
             this.reconnectTimeout = null;
             if (this.reconnectTime < 60) {
@@ -303,21 +314,32 @@ class _ServerConnector {
           }, this.reconnectTime * 1000);
         };
         this.ws.onerror = (event) => {};
-    
+
         this.ws.onmessage = (event) => {
           if (typeof event.data == 'string' && event.data.startsWith('pong')) {
             this.pingRoundtrip = Date.now() - this.pingLastTime;
+            this.pingPendingSince = 0;
           } else {
             this.processMessage(event.data);
           }
         };
         this.pingInterval = setInterval(() => {
-          // TODO interval --->>> Timeout
-          if (this.ws && this.ws.OPEN) {
+          if (!this.ws) return;
+          // If a previous ping never got answered within pingTimeoutMs we
+          // assume the connection is dead — force-close so onclose fires
+          // and the standard reconnect/backoff path takes over.
+          if (this.pingPendingSince > 0 && (Date.now() - this.pingPendingSince) > this.pingTimeoutMs) {
+            try { this.ws.close(); } catch (e) {}
+            return;
+          }
+          if (this.ws.readyState === WebSocket.OPEN) {
             this.pingLastTime = Date.now();
+            if (this.pingPendingSince === 0) {
+              this.pingPendingSince = this.pingLastTime;
+            }
             this.ws.send('ping');
           }
-        }, 10000);
+        }, this.pingIntervalMs);
       }
     
       private processMessage(text: string) {

@@ -1,20 +1,59 @@
-FROM node:20 AS base
+# --------------------------------------------------------------------------
+# NMOS Crosspoint — multi-stage build
+#
+#   Stage 1: ui-builder    — installs ui/ deps and runs `vite build`,
+#                            which writes the bundle to /build/server/public.
+#   Stage 2: server-builder — installs server/ deps (dev included) and runs
+#                            tsc to produce server/dist.
+#   Stage 3: runtime       — slim final image with only the server runtime
+#                            and the pre-built UI assets. No build tooling.
+#
+# Layer-caching trick: package*.json is copied BEFORE the source tree, so
+# the (slow) `npm ci` step is only re-run when dependencies actually change.
+# Source-only edits skip straight to the tsc / vite step.
+# --------------------------------------------------------------------------
 
-COPY ./ui /nmos-crosspoint/ui
-COPY ./server /nmos-crosspoint/server
-ENV PATH=/nmos-crosspoint/server/node_modules/.bin:$PATH
-ENV PATH=/nmos-crosspoint/ui/node_modules/.bin:$PATH
+# ============================== UI builder ===============================
+FROM node:20 AS ui-builder
+WORKDIR /build/ui
 
+# Dependency install — cached unless package*.json changes.
+COPY ui/package*.json ./
+RUN npm ci --no-audit --no-fund --prefer-offline
 
-
-WORKDIR /nmos-crosspoint/ui
-RUN npm install
+# Source + build. Vite's outDir is `../server/public`, so we create that
+# sibling directory now and let it land there.
+RUN mkdir -p /build/server/public
+COPY ui/ ./
 RUN npm run build
 
-WORKDIR /nmos-crosspoint/server
-RUN npm install -g typescript@latest
-RUN npm install
+
+# ============================ Server builder =============================
+FROM node:20 AS server-builder
+WORKDIR /build/server
+
+COPY server/package*.json ./
+RUN npm ci --no-audit --no-fund --prefer-offline
+
+COPY server/ ./
 RUN npm run build
 
+
+# ============================== Runtime ==================================
+FROM node:20-slim AS runtime
 WORKDIR /nmos-crosspoint/server
+
+# Production dependencies only — keeps the runtime image small.
+COPY server/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund --prefer-offline \
+ && npm cache clean --force
+
+# Compiled JS and the UI bundle (from the two previous stages).
+COPY --from=server-builder /build/server/dist  ./dist
+COPY --from=ui-builder     /build/server/public ./public
+
+# Settings + state come from volume mounts; create the directories so the
+# server doesn't error out on first boot when nothing is mounted yet.
+RUN mkdir -p ./config ./state ./log
+
 CMD ["node", "./dist/server.js"]

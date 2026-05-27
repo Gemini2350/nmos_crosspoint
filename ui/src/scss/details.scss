@@ -477,6 +477,18 @@ $det-color-data:  theme('colors.blue.500');
                 color: white;
                 border-radius: 3px;
             }
+            // "Virtual" badge for senders that live on our own virtual NMOS
+            // device — signals to the operator that the multicast comes from
+            // the SDP on the Setup page and isn't editable here.
+            .det-virtual-badge {
+                font-size: 0.7rem;
+                font-weight: 600;
+                margin-left: 6px;
+                padding: 1px 4px;
+                background: theme('colors.indigo.700');
+                color: white;
+                border-radius: 3px;
+            }
         }
 
         // Duplicate Multicast IP highlight

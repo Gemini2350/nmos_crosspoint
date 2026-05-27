@@ -20,6 +20,8 @@ import { SyncObject } from "./lib/SyncServer/syncObject";
 import { parseSettings } from "./lib/parseSettings";
 import { MulticastLeaseManager } from "./lib/multicastLeaseManager";
 import { DnsPushService } from "./lib/dnsPushService";
+import { NmosNodeApi } from "./lib/NmosNode/NmosNodeApi";
+import { NmosNodeRegistration } from "./lib/NmosNode/NmosNodeRegistration";
 
 
 
@@ -90,7 +92,23 @@ try{
     SyncLog.log("error", "Settings", "Can not read Server Address from settings. Default to "+serverAddress+".", e);
 }
 
-WebsocketSyncServer.init(serverAddress, serverPort);
+// Make the server.port available to NmosNodeApi (used to build the
+// advertised manifest_href). settings.server may not have it explicitly set.
+if(!settings.server || typeof settings.server !== "object") settings.server = {};
+settings.server.port = serverPort;
+
+// Construct the virtual NMOS Node API BEFORE the WebSocket server so we can
+// mount its routes via the init() hook. Registration (POST to registry +
+// heartbeat) happens further down once the registry connector exists.
+const nmosNodeApi = new NmosNodeApi(settings);
+
+WebsocketSyncServer.init(serverAddress, serverPort, (app:any) => {
+    // Mount /x-nmos/... routes BEFORE the SPA-fallback so the registry and
+    // any controller can query our virtual Node directly. Doing this in the
+    // init callback guarantees the routes are registered between the static
+    // middleware and the `/*` index.html fallback.
+    nmosNodeApi.mount(app);
+});
 let server = WebsocketSyncServer.getInstance();
 let users:any = null;
 try {
@@ -110,6 +128,50 @@ const multicastLeaseManager = new MulticastLeaseManager(settings);
 const dnsPushService = new DnsPushService();
 try { dnsPushService.setSettings(settings.dnsPush); } catch (e) {}
 
+// Register the virtual NMOS Node with the configured registry. Slight delay
+// so the registry-side subscriptions in NmosRegistryConnector have a chance
+// to come up first — that way, the registry's WS push reflecting our own
+// just-registered Node lands cleanly in nmosState without racing.
+const nmosNodeRegistration = new NmosNodeRegistration(settings);
+setTimeout(async () => {
+    try {
+        // Ask the kernel which local IP it would use to reach the registry
+        // (handles multi-homed / routed setups correctly without forcing
+        // the operator to configure virtualNode.advertiseHost). The sync
+        // subnet-match fallback inside NmosNodeApi covers same-VLAN setups
+        // until this completes.
+        await nmosNodeApi.detectAdvertiseHostAsync();
+    } catch (e) {}
+    try { nmosNodeRegistration.start(); } catch (e:any) {
+        SyncLog.log("error", "NMOS Node", "Initial registration failed: " + (e?.message || e));
+    }
+}, 2000);
+
+// Hook into the live registry switch: tear down our registration on the
+// old registry, then re-register on the new one. NmosRegistryConnector
+// already calls `reconnectStaticRegistries()` on a settings change — we
+// piggy-back via an onRegistrySwitched callback to keep coupling minimal.
+let _originalReconnect = (NmosRegistryConnector.instance as any)?.reconnectStaticRegistries?.bind(NmosRegistryConnector.instance);
+if (_originalReconnect && NmosRegistryConnector.instance) {
+    (NmosRegistryConnector.instance as any).reconnectStaticRegistries = async function() {
+        try { await nmosNodeRegistration.stop(); } catch (e) {}
+        _originalReconnect();
+        // Give the new registry's WS subscription a tick to connect before
+        // we POST our resources, so the registry's incoming PUTs find a
+        // ready receiver. Re-run advertiseHost detection because the new
+        // registry might live on a different subnet / interface.
+        setTimeout(async () => {
+            try {
+                nmosNodeApi.setSettings(settings);
+                await nmosNodeApi.detectAdvertiseHostAsync();
+            } catch (e) {}
+            try { nmosNodeRegistration.start(); } catch (e:any) {
+                SyncLog.log("error", "NMOS Node", "Re-registration on new registry failed: " + (e?.message || e));
+            }
+        }, 2000);
+    };
+}
+
 // Inventory of currently-pushed DNS entries, exposed to the Setup page.
 function getDnsPushedSnapshot() {
     return {
@@ -122,9 +184,64 @@ dnsPushService.setOnChange(() => {
     try { dnsPushedSync.setState(getDnsPushedSnapshot()); } catch (e) {}
 });
 
+// Build a fast { senderUuid → bitrate } map from the enriched crosspoint
+// state. Crosspoint flow ids are namespaced as "nmos_<uuid>"; lease keys are
+// raw UUIDs — hence the slice.
+function buildBitrateIndex(): { [uuid: string]: any } {
+    let out: { [uuid: string]: any } = {};
+    try {
+        let devs: any[] = (crosspoint.crosspointState && Array.isArray(crosspoint.crosspointState.devices))
+            ? crosspoint.crosspointState.devices : [];
+        for (let d of devs) {
+            if (!d || !d.senders) continue;
+            for (let type of Object.keys(d.senders)) {
+                let arr = d.senders[type];
+                if (!Array.isArray(arr)) continue;
+                for (let s of arr) {
+                    if (!s || typeof s.id !== "string") continue;
+                    if (!s.id.startsWith("nmos_")) continue;
+                    out[s.id.slice(5)] = s.bitrate;
+                }
+            }
+        }
+    } catch (e) {}
+    return out;
+}
+
+// Each lease gets:
+//   liveStatus — "active" / "inactive" / "missing", looked up from the live
+//                NMOS sender table (subscription.active flag).
+//   bitrate    — pulled from the enriched crosspoint state so the Setup
+//                inventory shows the same value as the Details page.
+// The Setup-page UI used to derive both fields client-side; doing it on the
+// server keeps the multicastLeases sync object self-contained.
 function getMulticastLeaseSnapshot() {
+    let raw = multicastLeaseManager.getAllLeases();
+    let nmosSenders: any = null;
+    try {
+        if (NmosRegistryConnector.instance) {
+            nmosSenders = (NmosRegistryConnector.instance as any).nmosState?.senders;
+        }
+    } catch (e) {}
+    let bitrateByUuid = buildBitrateIndex();
+    let enriched: any = {};
+    for (let id in raw) {
+        let l = raw[id];
+        if (!l) continue;
+        let liveStatus: "active" | "inactive" | "missing" = "missing";
+        try {
+            let s = nmosSenders ? nmosSenders[id] : null;
+            if (s) {
+                liveStatus = (s.subscription && s.subscription.active) ? "active" : "inactive";
+            }
+        } catch (e) {}
+        enriched[id] = Object.assign({}, l, {
+            liveStatus,
+            bitrate: bitrateByUuid[id]
+        });
+    }
     return {
-        leases: multicastLeaseManager.getAllLeases(),
+        leases: enriched,
         stats: multicastLeaseManager.getStats(),
         updatedAt: new Date().toISOString()
     };
@@ -135,6 +252,16 @@ multicastLeaseManager.setOnChange(() => {
         multicastLeasesSync.setState(getMulticastLeaseSnapshot());
     } catch (e) {}
 });
+
+// The lease snapshot's liveStatus + bitrate are sourced from the crosspoint
+// state, so we need to republish whenever that state changes (e.g. a sender
+// becomes active or its bitrate is recomputed). The lease manager itself
+// doesn't see these transitions.
+try {
+    crosspoint.onStateUpdated = () => {
+        try { multicastLeasesSync.setState(getMulticastLeaseSnapshot()); } catch (e) {}
+    };
+} catch (e) {}
 
 // Make the allocator collision-aware against live NMOS senders: when picking
 // a fresh pair, the manager will also skip any IP currently advertised in any
@@ -237,11 +364,24 @@ function getSetupConfigState() {
         }
     }catch(e){}
 
+    // Virtual NMOS Node feature: master toggle the Setup page exposes,
+    // plus the read-only nodeId so the Details page can detect which
+    // crosspoint senders belong to our virtual device (and hide the
+    // multicast-edit button for them — virtual senders are read-only over
+    // IS-05, the IP comes straight from the operator-pasted SDP).
+    let virtualNodeCfg = (settings.virtualNode && typeof settings.virtualNode === "object") ? settings.virtualNode : {};
+    let virtualNode = {
+        enabled:  virtualNodeCfg.enabled !== false,
+        deviceId: (typeof virtualNodeCfg.deviceId === "string") ? virtualNodeCfg.deviceId : "",
+        nodeId:   (typeof virtualNodeCfg.nodeId   === "string") ? virtualNodeCfg.nodeId   : ""
+    };
+
     return {
         registry,
         acceptableGmid: (typeof settings.acceptableGmid === "string") ? settings.acceptableGmid : "",
         vendorProfiles,
         virtualSenders,
+        virtualNode,
         multicastRange,
         autoMulticast,
         autoActivateInactiveSender,
@@ -261,6 +401,14 @@ server.addSyncObject("setupConfig","public",setupConfigSync);
 try{
     crosspoint.onVirtualSendersChange = () => {
         try{ setupConfigSync.setState(getSetupConfigState()); }catch(e){}
+        // Also re-register the renamed sender with the registry so other
+        // controllers see the new label without waiting for the next
+        // settings.json round-trip.
+        try{
+            nmosNodeApi.setSettings(settings);
+            nmosNodeRegistration.setSettings(settings);
+            nmosNodeRegistration.syncResources().catch(()=>{});
+        }catch(e){}
     };
 }catch(e){}
 
@@ -502,6 +650,14 @@ server.addRoute("POST", "setupConfig","global", (client: WebsocketClient, query:
                             };
                         });
                 }
+                if(postData.virtualNode && typeof postData.virtualNode === "object" && typeof postData.virtualNode.enabled === "boolean"){
+                    // getSetupConfigState always seeds next.virtualNode with
+                    // { enabled, deviceId, nodeId } — we only ever flip the
+                    // operator-controlled enable flag here.
+                    if(next.virtualNode){
+                        next.virtualNode.enabled = postData.virtualNode.enabled;
+                    }
+                }
             }
 
             // Reflect into the in-memory settings object
@@ -517,22 +673,69 @@ server.addRoute("POST", "setupConfig","global", (client: WebsocketClient, query:
                 settings.staticNmosRegistries[0].port = next.registry.port;
                 firstChanged = true;
             }
+            let prevAcceptableGmid = settings.acceptableGmid || "";
             settings.acceptableGmid = next.acceptableGmid;
             settings.vendorProfiles = next.vendorProfiles;
-            if(Array.isArray(next.virtualSenders)){
+
+            // Track whether anything that affects our published IS-04 Node
+            // changed (virtual senders, acceptable GMID for the clock entry,
+            // the master enable toggle). If yes, rebuild + re-POST below.
+            let virtualSendersChanged = Array.isArray(next.virtualSenders);
+            let gmidChanged           = prevAcceptableGmid !== settings.acceptableGmid;
+            let prevVirtualEnabled    = !settings.virtualNode || settings.virtualNode.enabled !== false;
+            let nextVirtualEnabled    = (next.virtualNode && typeof next.virtualNode.enabled === "boolean")
+                                            ? next.virtualNode.enabled
+                                            : prevVirtualEnabled;
+            let virtualToggleChanged  = prevVirtualEnabled !== nextVirtualEnabled;
+
+            if(virtualToggleChanged){
+                if(!settings.virtualNode) settings.virtualNode = {};
+                settings.virtualNode.enabled = nextVirtualEnabled;
+            }
+
+            if(virtualSendersChanged){
                 settings.virtualSenders = next.virtualSenders;
                 // Re-run the parse step on just this slice so any missing
-                // senderId UUIDs get minted and the schema stays
-                // self-healing (same logic as the boot-time read).
+                // senderId / sourceId / flowId UUIDs get minted and the
+                // schema stays self-healing (same logic as boot-time read).
                 try{
                     let tmp:any = { virtualSenders: settings.virtualSenders };
                     parseSettings(tmp);
                     settings.virtualSenders = tmp.virtualSenders;
                 }catch(e){}
-                // Notify the crosspoint abstraction so its worker can re-
-                // materialise the virtual device with the new list. We push
-                // the update through the same path as nmosState updates.
+                // Notify the crosspoint abstraction so the worker's
+                // virtualSenders mirror stays current (used by the alias-
+                // rename round-trip; the worker no longer materialises a
+                // synthetic device).
                 try{ crosspoint.setVirtualSenders(settings.virtualSenders); }catch(e){}
+            }
+
+            // Master toggle transitions take precedence over re-sync: when
+            // turning the feature off we DELETE everything from the registry;
+            // when turning it on we POST it all from scratch. Both reset the
+            // tracking sets inside NmosNodeRegistration.
+            if(virtualToggleChanged){
+                try{ nmosNodeApi.setSettings(settings); }catch(e){}
+                try{ nmosNodeRegistration.setSettings(settings); }catch(e){}
+                if(nextVirtualEnabled){
+                    // off → on: register from scratch.
+                    nmosNodeRegistration.start().catch(()=>{});
+                }else{
+                    // on → off: deregister and stop heartbeat.
+                    nmosNodeRegistration.stop().catch(()=>{});
+                }
+            }else if(virtualSendersChanged || gmidChanged){
+                // Rebuild the IS-04 / IS-05 record cache from the new
+                // settings (virtual senders' SDPs and the acceptable GMID
+                // both feed into the Node + Sender records) and re-POST
+                // everything so the registry sees the change.
+                try{
+                    nmosNodeApi.setSettings(settings);
+                    nmosNodeRegistration.setSettings(settings);
+                    nmosNodeRegistration.syncResources().catch(()=>{});
+                }catch(e:any){
+                    SyncLog.log("warn", "NMOS Node", "Could not re-sync to registry: " + (e?.message || e));
+                }
             }
             // Track whether the multicast pool CIDR changed — the UI sends
             // the same Adopt-vs-Renew choice for that case, so we need a
@@ -647,9 +850,22 @@ server.addRoute("POST", "setupConfig","global", (client: WebsocketClient, query:
                 next.dnsPush = safeDnsPush;
             }catch(e){}
 
-            // Publish new state. We can hot-apply the acceptableGmid (cosmetic),
-            // but a registry change needs a restart to actually re-open subscriptions.
-            next.restartRequired = firstChanged;
+            // A registry change is hot-applied: tear down every active query
+            // API WebSocket and re-subscribe to the new IP/port. The NMOS
+            // SyncObject is reset along the way so the UI doesn't keep cards
+            // for devices that belong to the old registry.
+            if(firstChanged){
+                try{
+                    if(NmosRegistryConnector.instance){
+                        NmosRegistryConnector.instance.reconnectStaticRegistries();
+                    }
+                }catch(e:any){
+                    SyncLog.log("error", "NMOS Settings", "Live registry switch failed: " + (e?.message || e));
+                }
+            }
+            // Restart no longer required — keep the field for back-compat
+            // with older UIs but always report false from here on.
+            next.restartRequired = false;
             setupConfigSync.setState(next);
 
             resolve({message:200, data:next});

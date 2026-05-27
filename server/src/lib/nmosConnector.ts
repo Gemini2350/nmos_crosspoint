@@ -208,6 +208,13 @@ export class NmosRegistryConnector {
     private channelmappingVersionList = ["v1.0"];
     private nmosRegistryList: NmosRegistry[] = [];
 
+    // Generation counter for live registry switching. Every WebSocket
+    // subscription captures the generation it was started under; lingering
+    // reconnect timers (onclose / .catch) bail out when the generation has
+    // advanced, so a switch from registry A → B can't be undone by a
+    // stale auto-reconnect aiming at A.
+    private registryGen = 0;
+
 
     updateCrosspointTimer:any = null;
     updateCrosspointLimit = 0;
@@ -253,25 +260,35 @@ export class NmosRegistryConnector {
     }
 
     private getVersionSubscription(nmosRegistryUrl: string, resource: string, version:string){
+        // Capture the generation at subscribe time. If reconnectStaticRegistries
+        // is called mid-flight (live switch), this.registryGen advances and the
+        // late-arriving response / reconnect timer skips itself.
+        const myGen = this.registryGen;
         axios.post(nmosRegistryUrl + "/x-nmos/query/" + version + "/subscriptions", {
             resource_path: resource,
             params: {},
             persist: false,
             max_update_rate_ms: 50,
         }).then((response: any) => {
+            if(myGen !== this.registryGen) return;  // Registry was switched while we were waiting.
             this.logReset = true;
             let subscription = response.data;
             let fullResource = nmosRegistryUrl + "_" + resource + "_" + version;
             if (this.connections[fullResource]) {
                 this.connections[fullResource].ws.onmessage = (message) => {};
+                try{ if(this.connections[fullResource].pingInterval){ clearInterval(this.connections[fullResource].pingInterval); } }catch(e){}
                 try{
                     this.connections[fullResource].ws.close();
                 }catch(e){}
             }
+            let newWs:any = new WebSocket(subscription.ws_href);
             this.connections[fullResource] = {
                 version,
                 subscription,
-                ws: new WebSocket(subscription.ws_href),
+                ws: newWs,
+                pingInterval: null,
+                pongPending: false,
+                lastPongAt: Date.now()
             };
 
             this.connections[fullResource].ws.error = () => {
@@ -280,9 +297,17 @@ export class NmosRegistryConnector {
 
             this.connections[fullResource].ws.onclose = () => {
                 this.connections[fullResource].ws.onmessage = (message) => {};
-                
+                try{ if(this.connections[fullResource]?.pingInterval){ clearInterval(this.connections[fullResource].pingInterval); this.connections[fullResource].pingInterval = null; } }catch(e){}
+
+                if(myGen !== this.registryGen){
+                    // This close was caused by the live-switch teardown — don't
+                    // log scary "closed" lines and don't try to reconnect.
+                    return;
+                }
+
                 SyncLog.log("error",  "NMOS","Closed subscription to Registry: " + nmosRegistryUrl + ", " + resource + ", " + version );
                 setTimeout(()=>{
+                    if(myGen !== this.registryGen) return;
                     this.getVersionSubscription(nmosRegistryUrl,resource,version );
                 },1000)
                 this.updateSyncConnectionState();
@@ -291,15 +316,51 @@ export class NmosRegistryConnector {
                 this.updateSyncConnectionState();
             };
 
+            // Native RFC 6455 pong frame — emitted by the `ws` library when
+            // the NMOS query API answers our heartbeat. Clearing pongPending
+            // tells the liveness timer the connection is alive.
+            newWs.on("pong", () => {
+                let conn:any = this.connections[fullResource];
+                if(!conn) return;
+                conn.pongPending = false;
+                conn.lastPongAt  = Date.now();
+            });
+
+            // Heartbeat. Without this, an idle subscription that gets dropped
+            // by a stateful firewall / NAT between server and registry sits
+            // silently forever — no onclose, no reconnect, the UI shows
+            // stale devices. We send a native ping every 15 s; if no pong
+            // comes back within 30 s we terminate() so onclose fires and
+            // the standard reconnect path takes over.
+            const pingMs   = 15000;
+            const pongMs   = 30000;
+            this.connections[fullResource].pingInterval = setInterval(() => {
+                let conn:any = this.connections[fullResource];
+                if(!conn) return;
+                if(myGen !== this.registryGen) return;
+                try{
+                    if(conn.ws.readyState !== conn.ws.OPEN) return;
+                    if(conn.pongPending && (Date.now() - conn.lastPongAt) > pongMs){
+                        SyncLog.log("warn", "NMOS", "Pong timeout on subscription " + resource + " (" + nmosRegistryUrl + ") — terminating for reconnect.");
+                        try{ conn.ws.terminate(); }catch(e){}
+                        return;
+                    }
+                    conn.pongPending = true;
+                    conn.ws.ping();
+                }catch(e){}
+            }, pingMs);
+
             this.connections[fullResource].ws.onmessage = (message) => {
+                if(myGen !== this.registryGen) return;
                 this.updateState(JSON.parse(message.data),version);
             };
-            
+
             SyncLog.log("info",  "NMOS","Subscribed to Registry: " + nmosRegistryUrl + ", " + resource + ", " + version );
         }).catch((error) => {
-            
+            if(myGen !== this.registryGen) return;  // Switched registries while the POST was failing.
             //console.log(error);
             	setTimeout(()=>{
+                    if(myGen !== this.registryGen) return;
                     this.getVersionSubscription(nmosRegistryUrl,resource,version );
                 },20000)
                 if(this.logReset){
@@ -307,6 +368,77 @@ export class NmosRegistryConnector {
                     SyncLog.log("error",  "NMOS","Error While creating NMOS Subscription on Registry: " + nmosRegistryUrl + ", " + resource + ", " + version, {message:error.message});
                 }
         });
+    }
+
+
+    /**
+     * Tear down every active WebSocket subscription, drop the registry list
+     * and wipe the cached NMOS state. Used by reconnectStaticRegistries() to
+     * cleanly switch to a new query API URL without restarting the process.
+     *
+     * Reconnect timers from this generation are made no-ops by bumping
+     * `this.registryGen` (every WS handler captured the value at subscribe
+     * time and bails out when it no longer matches).
+     */
+    private disconnectAllRegistries(){
+        this.registryGen++;
+        for(let key of Object.keys(this.connections)){
+            let conn:any = this.connections[key];
+            try{ if(conn.pingInterval){ clearInterval(conn.pingInterval); conn.pingInterval = null; } }catch(e){}
+            try{
+                conn.ws.onmessage = () => {};
+                conn.ws.onclose   = () => {};
+                conn.ws.onerror   = () => {};
+            }catch(e){}
+            try{ conn.ws.close(); }catch(e){}
+        }
+        this.connections = {};
+        this.nmosRegistryList = [];
+        // Reset the in-memory NMOS state so the UI doesn't see stale devices
+        // from the previous registry. setState emits a JSON-patch reset to
+        // every subscribed client.
+        this.nmosState = {
+            devices: {}, sources: {}, senders: {}, receivers: {},
+            flows: {}, nodes: {}, senderActiveData: {}, channelmapping: {},
+            sendersManifestDetail: {}
+        };
+        this.syncNmos.setState(this.nmosState);
+        this.updateSyncConnectionState();
+    }
+
+
+    /**
+     * Hot-apply a change to settings.staticNmosRegistries: tear down all
+     * existing query-API subscriptions, then re-subscribe to whatever the
+     * settings now point at. Used by the Setup page so the operator never
+     * has to restart the server to switch between registries.
+     */
+    public reconnectStaticRegistries(){
+        SyncLog.log("info", "NMOS", "Live-switching NMOS registry — tearing down existing subscriptions.");
+        this.disconnectAllRegistries();
+        try{
+            if(Array.isArray(this.settings.staticNmosRegistries)){
+                this.settings.staticNmosRegistries.forEach((staticRegistry:any) => {
+                    if(!staticRegistry || !staticRegistry.ip || !staticRegistry.port) return;
+                    try {
+                        let registry: NmosRegistry = {
+                            ip: staticRegistry.ip,
+                            port: staticRegistry.port,
+                            priority: staticRegistry.priority,
+                            source: "static",
+                            domain: staticRegistry.domain,
+                        };
+                        this.addRegistry(registry);
+                        SyncLog.log("info", "NMOS Settings", "Re-adding Static Registry: " + JSON.stringify(staticRegistry));
+                    } catch (e) {
+                        SyncLog.log("error", "NMOS Settings", "Can not add Static Registry: " + JSON.stringify(staticRegistry));
+                    }
+                });
+            }
+        }catch(e){}
+        // Force a crosspoint rebuild so the UI clears any device cards that
+        // were built from the old registry's state.
+        this.updateCrosspoint();
     }
 
     private versionIsPrefered(oldVersion:string, newVersion:string, registry=true){

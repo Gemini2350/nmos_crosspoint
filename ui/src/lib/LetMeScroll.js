@@ -1,4 +1,4 @@
-
+// @ts-nocheck
 /*-------------------------
 LetMeScroll.js
 Made by: Bruno Vieira

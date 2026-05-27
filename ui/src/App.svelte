@@ -81,65 +81,25 @@
     let uiConfigSync:Subject<any> ;
 
     // ----- Global Dev / TX / RX availability counter -----
-    // Subscribes to the `crosspoint` sync object so the numbers update in
-    // real-time as devices come and go from the NMOS registry. The counter
+    // Numbers are computed on the server (CrosspointAbstraction.enrichCrosspointState)
+    // and shipped on the `crosspoint` SyncObject as `state.totals`. The counter
     // sits at the very top of the right-hand nav so it's visible from every
     // page (Crosspoint, Details, Setup, …).
     let crosspointSync:Subject<any>;
     let countAvailDev = 0, countTotalDev = 0;
     let countAvailTx  = 0, countTotalTx  = 0;
     let countAvailRx  = 0, countTotalRx  = 0;
-    // Heaviest part of this counter is the O(devices*flows) walk. With lots
-    // of senders the crosspoint SyncObject can deliver many patches in quick
-    // succession — coalesce them into a single recompute per animation
-    // frame so we don't burn CPU on every tiny patch.
-    let _pendingCrosspoint:any = null;
-    let _availScheduled = false;
-    function scheduleRecomputeAvailability(state:any){
-      _pendingCrosspoint = state;
-      if(_availScheduled) return;
-      _availScheduled = true;
-      const run = () => {
-        _availScheduled = false;
-        const s = _pendingCrosspoint;
-        _pendingCrosspoint = null;
-        recomputeAvailabilityNow(s);
-      };
-      if(typeof requestAnimationFrame === "function"){
-        requestAnimationFrame(run);
+    function applyTotals(state:any){
+      let t = state && state.totals;
+      if(t && t.devices && t.senders && t.receivers){
+        countAvailDev = t.devices.avail|0; countTotalDev = t.devices.total|0;
+        countAvailTx  = t.senders.avail|0; countTotalTx  = t.senders.total|0;
+        countAvailRx  = t.receivers.avail|0; countTotalRx  = t.receivers.total|0;
       }else{
-        setTimeout(run, 16);
+        countAvailDev = 0; countTotalDev = 0;
+        countAvailTx  = 0; countTotalTx  = 0;
+        countAvailRx  = 0; countTotalRx  = 0;
       }
-    }
-    function recomputeAvailabilityNow(state:any){
-      let aDev = 0, tDev = 0;
-      let aTx  = 0, tTx  = 0;
-      let aRx  = 0, tRx  = 0;
-      try{
-        let devs = (state && Array.isArray(state.devices)) ? state.devices : [];
-        for(let d of devs){
-          if(!d) continue;
-          tDev++;
-          if(d.available) aDev++;
-          for(let type of Object.keys(d.senders || {})){
-            for(let s of (d.senders[type] || [])){
-              if(!s) continue;
-              tTx++;
-              if(s.available) aTx++;
-            }
-          }
-          for(let type of Object.keys(d.receivers || {})){
-            for(let r of (d.receivers[type] || [])){
-              if(!r) continue;
-              tRx++;
-              if(r.available) aRx++;
-            }
-          }
-        }
-      }catch(e){}
-      countAvailDev = aDev; countTotalDev = tDev;
-      countAvailTx  = aTx;  countTotalTx  = tTx;
-      countAvailRx  = aRx;  countTotalRx  = tRx;
     }
     function counterStateClass(avail:number, total:number){
       if(total === 0) return "nav-counter-row-neutral";
@@ -164,7 +124,7 @@
 
       crosspointSync = ServerConnector.sync("crosspoint");
       crosspointSync.subscribe((obj:any)=>{
-        scheduleRecomputeAvailability(obj);
+        applyTotals(obj);
       });
       
       ServerConnector.connectionState.subscribe((state)=>{

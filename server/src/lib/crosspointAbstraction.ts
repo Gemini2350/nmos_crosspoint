@@ -253,31 +253,29 @@ const md5 = data => crypto.createHash('md5').update(data).digest("hex")
                 changeAlias:{id:id, alias:alias}
             }));
 
-            // Virtual sender alias: keep settings.virtualSenders[].name in
-            // sync with the alias the operator typed on the Details page,
-            // and re-publish the list to the worker so the Setup UI and
-            // the Crosspoint card show the same name. Persist settings.json
-            // straight away so the new name survives a restart.
-            if(id && id.startsWith("virtual_")){
+            // If this alias belongs to a virtual sender, also update
+            // settings.virtualSenders[].name so the registered IS-04 sender
+            // label tracks the operator's rename. Virtual senders show up as
+            // nmos_<senderId> just like real ones, so we match by the UUID
+            // portion of the id against the persisted senderId.
+            if(id && id.startsWith("nmos_") && Array.isArray(this.settings?.virtualSenders)){
                 try{
-                    let vsId = id.slice(8);
-                    if(Array.isArray(this.settings?.virtualSenders)){
-                        let entry = this.settings.virtualSenders.find((v:any) => v && v.id === vsId);
-                        if(entry){
-                            let newName = (alias && alias.trim()) ? alias.trim() : "";
-                            if(entry.name !== newName){
-                                entry.name = newName;
-                                this.virtualSenders = this.settings.virtualSenders;
-                                this.update();
-                                try{
-                                    const fs = require("fs");
-                                    fs.writeFileSync("./config/settings.json", JSON.stringify(this.settings, null, 4));
-                                    SyncLog.log("info", "Settings", "Updated virtualSenders[" + vsId + "].name from alias change.");
-                                }catch(e:any){
-                                    SyncLog.log("warn", "Settings", "Could not persist virtual sender rename: " + (e?.message || e));
-                                }
-                                try{ if(this.onVirtualSendersChange){ this.onVirtualSendersChange(); } }catch(e){}
+                    let nmosId = id.slice(5);
+                    let entry = this.settings.virtualSenders.find((v:any) => v && v.senderId === nmosId);
+                    if(entry){
+                        let newName = (alias && alias.trim()) ? alias.trim() : "";
+                        if(entry.name !== newName){
+                            entry.name = newName;
+                            this.virtualSenders = this.settings.virtualSenders;
+                            this.update();
+                            try{
+                                const fs = require("fs");
+                                fs.writeFileSync("./config/settings.json", JSON.stringify(this.settings, null, 4));
+                                SyncLog.log("info", "Settings", "Updated virtualSenders[" + entry.id + "].name from alias change.");
+                            }catch(e:any){
+                                SyncLog.log("warn", "Settings", "Could not persist virtual sender rename: " + (e?.message || e));
                             }
+                            try{ if(this.onVirtualSendersChange){ this.onVirtualSendersChange(); } }catch(e){}
                         }
                     }
                 }catch(e){}
@@ -665,32 +663,14 @@ const md5 = data => crypto.createHash('md5').update(data).digest("hex")
                     SyncLog.log("info", "connect_crosspoint", "Make Connect: Receiver "+ dst.id + "    <   Sender " + src.id)
                     try{
                         if(src.id.startsWith("nmos_")){
+                            // Virtual senders also live under nmos_<id> now —
+                            // they are registered with the NMOS registry by
+                            // NmosNodeRegistration and their manifest_href
+                            // points back at our own /x-nmos endpoint, so
+                            // connectionGetSenderInfo just works.
                             let nmosId = src.id.slice(5);
                             senderInfo = await NmosRegistryConnector.instance.connectionGetSenderInfo(nmosId);
-                        } else if(src.id.startsWith("virtual_")){
-                            // Operator-defined virtual sender — no NMOS source
-                            // to query. Build the senderInfo directly from the
-                            // SDP the operator pasted on the Setup page; the
-                            // receiver PATCH later carries this as its
-                            // transport_file. We pass the virtual sender's
-                            // stable UUID (`senderId`) as sender_id so the
-                            // receiver record cleanly references the binding
-                            // and the operator sees it on the Details page.
-                            let vsId = src.id.slice(8);
-                            let vs:any = (this.virtualSenders || []).find((v:any) => v && v.id === vsId);
-                            if(!vs){
-                                throw new Error("virtual sender " + vsId + " not found");
-                            }
-                            senderInfo = {
-                                senderId:     vs.senderId || "",
-                                interfaces:   [],
-                                manifestFile: vs.sdp || "",
-                                active:       true,
-                                error:        "",
-                                transport:    "rtp"
-                            };
                         }
-
                     }catch(e){
                         reject({src:src,dst:dst,status:"failed sender info"});
                     }
@@ -864,7 +844,9 @@ const md5 = data => crypto.createHash('md5').update(data).digest("hex")
     updateReturn(data:any){
         if(data.hasOwnProperty("crosspointState")){
             this.crosspointState = data.crosspointState;
+            this.enrichCrosspointState();
             this.syncCrosspoint.setState(this.crosspointState);
+            try{ if(this.onStateUpdated){ this.onStateUpdated(); } }catch(e){}
         }
 
         if(data.hasOwnProperty("log")){
@@ -876,8 +858,377 @@ const md5 = data => crypto.createHash('md5').update(data).digest("hex")
         }
     }
 
-    
-    
+
+    // Notified each time the enriched crosspoint state is republished. Used
+    // by server.ts to refresh derived snapshots (multicast lease inventory)
+    // whose live status depends on the current crosspoint / NMOS view.
+    public onStateUpdated:(()=>void)|null = null;
+
+
+    // ------------------------------------------------------------------
+    // Enrichment: everything below was previously computed in the browser
+    // (details.svelte / setup.svelte / App.svelte). Moving it here keeps
+    // the rendering side dumb and avoids duplicating NMOS-parsing logic
+    // across UI files.
+    // ------------------------------------------------------------------
+
+    private static MEDIA_TYPE_CODEC: { [mt:string]: string } = {
+        "video/raw":      "RAW Video",
+        "video/jxsv":     "JPEG-XS Video",
+        "video/colibri":  "Colibri Video",
+        "audio/L16":      "16 Bit LPCM",
+        "audio/L24":      "24 Bit LPCM",
+        // L32 carries 24-bit LPCM samples padded into a 32-bit container.
+        "audio/L32":      "24 Bit LPCM",
+        "audio/AM824":    "ST2110-31 AES3",
+        "video/smpte291": "ANC"
+    };
+
+    private mediaTypesToCodec(types:string[]): string {
+        if(!Array.isArray(types) || types.length === 0) return "";
+        let out:string[] = [];
+        for(let t of types){
+            let pretty = CrosspointAbstraction.MEDIA_TYPE_CODEC[t] || t;
+            if(pretty && !out.includes(pretty)) out.push(pretty);
+        }
+        return out.join(", ");
+    }
+
+    private buildCodecFromManifest(nmosSenderId:string): string {
+        if(!nmosSenderId || !this.nmosState) return "";
+        try{
+            let manifest:any = this.nmosState.sendersManifestDetail?.[nmosSenderId];
+            if(!manifest || !Array.isArray(manifest.media) || manifest.media.length === 0) return "";
+            let labels:string[] = [];
+            for(let m of manifest.media){
+                if(!m || !Array.isArray(m.rtp) || m.rtp.length === 0) continue;
+                let codec = ("" + (m.rtp[0].codec || "")).toUpperCase();
+                let pretty = codec;
+                switch(codec){
+                    case "L16":      pretty = "16 Bit LPCM"; break;
+                    case "L24":      pretty = "24 Bit LPCM"; break;
+                    case "L32":      pretty = "24 Bit LPCM"; break;
+                    case "AM824":    pretty = "ST2110-31 AES3"; break;
+                    case "RAW":      pretty = "RAW Video"; break;
+                    case "JXSV":     pretty = "JPEG-XS Video"; break;
+                    case "SMPTE291": pretty = "ANC"; break;
+                    case "VC2":      pretty = "VC-2"; break;
+                    default:
+                        if(!codec) pretty = "";
+                }
+                if(pretty && !labels.includes(pretty)) labels.push(pretty);
+            }
+            return labels.join(", ");
+        }catch(e){}
+        return "";
+    }
+
+    // IS-05 /active is authoritative for what a sender is currently
+    // transmitting. The SDP may lag (or 404 for inactive senders) so we
+    // only fall back to it when no transport_params exist.
+    private buildLegsFromNmos(nmosSenderId:string): CrosspointFlowLeg[] {
+        let legs:CrosspointFlowLeg[] = [];
+        if(!nmosSenderId || !this.nmosState) return legs;
+
+        try{
+            let active:any = this.nmosState.senderActiveData?.[nmosSenderId];
+            if(active && Array.isArray(active.transport_params) && active.transport_params.length > 0){
+                active.transport_params.forEach((tp:any, index:number) => {
+                    legs.push({
+                        index,
+                        dstIp:   tp?.destination_ip   ? ("" + tp.destination_ip)   : "",
+                        dstPort: (tp?.destination_port !== undefined && tp?.destination_port !== null) ? tp.destination_port : "",
+                        srcIp:   tp?.source_ip        ? ("" + tp.source_ip)        : ""
+                    });
+                });
+            }
+        }catch(e){}
+
+        if(legs.length === 0){
+            try{
+                let manifest:any = this.nmosState.sendersManifestDetail?.[nmosSenderId];
+                if(manifest && Array.isArray(manifest.media) && manifest.media.length > 0){
+                    manifest.media.forEach((media:any, index:number) => {
+                        let dstIp = "";
+                        let srcIp = "";
+                        let port:string|number = "";
+                        try{
+                            if(media.sourceFilter){
+                                dstIp = media.sourceFilter.destAddress || "";
+                                srcIp = media.sourceFilter.srcList || "";
+                            }
+                            if(!dstIp && media.connection?.ip){
+                                dstIp = ("" + media.connection.ip).split("/")[0];
+                            }
+                            if(media.port !== undefined && media.port !== null){ port = media.port; }
+                        }catch(e){}
+                        legs.push({ index, dstIp, dstPort: port, srcIp });
+                    });
+                }
+            }catch(e){}
+        }
+
+        legs.sort((a, b) => a.index - b.index);
+        return legs;
+    }
+
+    private buildGmidFromNode(nodeId:string): { gmid:string, locked:boolean } {
+        if(!nodeId || !this.nmosState) return { gmid:"", locked:false };
+        try{
+            let node:any = this.nmosState.nodes?.[nodeId];
+            if(!node || !Array.isArray(node.clocks)) return { gmid:"", locked:false };
+            let firstPtp:any = null;
+            for(let clk of node.clocks){
+                if(clk && clk.ref_type === "ptp"){
+                    if(!firstPtp) firstPtp = clk;
+                    if(clk.locked && clk.gmid){
+                        return { gmid: ("" + clk.gmid).toUpperCase(), locked: true };
+                    }
+                }
+            }
+            if(firstPtp && firstPtp.gmid){
+                return { gmid: ("" + firstPtp.gmid).toUpperCase(), locked: !!firstPtp.locked };
+            }
+        }catch(e){}
+        return { gmid:"", locked:false };
+    }
+
+    private matchVendorProfile(profile:any, label:string, description:string): boolean {
+        let raw:string = (profile && typeof profile.labels === "string") ? profile.labels : "";
+        if(!raw) return false;
+        let needles = raw.split(",").map(x => x.trim().toLowerCase()).filter(x => x.length > 0);
+        if(needles.length === 0) return false;
+        let hay = ((label || "") + " " + (description || "")).toLowerCase();
+        for(let n of needles){
+            if(hay.includes(n)) return true;
+        }
+        return false;
+    }
+
+    private buildDeviceUrl(nodeId:string): string {
+        if(!nodeId || !this.nmosState) return "";
+        try{
+            let node:any = this.nmosState.nodes?.[nodeId];
+            if(!node || !node.href) return "";
+            let u = new URL("" + node.href);
+            let host = u.hostname;
+
+            let vendorProfiles:any[] = Array.isArray(this.settings?.vendorProfiles) ? this.settings.vendorProfiles : [];
+            let label:string = node.label || "";
+            let description:string = node.description || "";
+            for(let profile of vendorProfiles){
+                if(this.matchVendorProfile(profile, label, description)){
+                    let proto = (profile.protocol === "https") ? "https" : "http";
+                    let port = parseInt("" + profile.port);
+                    if(isNaN(port) || port <= 0 || port > 65535){
+                        port = (proto === "https") ? 443 : 80;
+                    }
+                    let path = (typeof profile.path === "string" && profile.path) ? profile.path : "/";
+                    if(!path.startsWith("/")) path = "/" + path;
+                    let portSuffix = ((proto === "http" && port === 80) || (proto === "https" && port === 443))
+                        ? "" : (":" + port);
+                    return proto + "://" + host + portSuffix + path;
+                }
+            }
+            return u.protocol + "//" + u.host + "/";
+        }catch(e){}
+        return "";
+    }
+
+    // Find the NMOS node behind a crosspoint device id (handles nmos_<devId>,
+    // nmosgrp_<hash> and the virtual_node placeholder).
+    private resolveDeviceNodeInfo(dev:CrosspointDevice): { nmosDevId:string, nodeId:string, nodeLabel:string, nmosDevLabel:string } {
+        let nmosDevId = "";
+        let nodeId = "";
+        let nodeLabel = "";
+        let nmosDevLabel = "";
+        if(!this.nmosState || typeof dev.id !== "string") return { nmosDevId, nodeId, nodeLabel, nmosDevLabel };
+        try{
+            if(dev.id.startsWith("nmos_")){
+                nmosDevId = dev.id.substring(5);
+            }else if(dev.id.startsWith("nmosgrp_")){
+                let allFlows:any[] = [];
+                for(let type of Object.keys(dev.senders || {})) allFlows = allFlows.concat(dev.senders[type] || []);
+                for(let type of Object.keys(dev.receivers || {})) allFlows = allFlows.concat(dev.receivers[type] || []);
+                for(let f of allFlows){
+                    if(typeof f.id !== "string" || !f.id.startsWith("nmos_")) continue;
+                    let nid = f.id.substring(5);
+                    let s:any = this.nmosState.senders?.[nid];
+                    if(s?.device_id){ nmosDevId = s.device_id; break; }
+                    let r:any = this.nmosState.receivers?.[nid];
+                    if(r?.device_id){ nmosDevId = r.device_id; break; }
+                }
+            }
+            if(nmosDevId && this.nmosState.devices?.[nmosDevId]){
+                let nmosDev:any = this.nmosState.devices[nmosDevId];
+                nmosDevLabel = nmosDev.label || "";
+                nodeId = nmosDev.node_id || "";
+                if(nodeId && this.nmosState.nodes?.[nodeId]){
+                    nodeLabel = this.nmosState.nodes[nodeId].label || "";
+                }
+            }
+        }catch(e){}
+        return { nmosDevId, nodeId, nodeLabel, nmosDevLabel };
+    }
+
+    private buildConnectedSenderLabel(connectedFlowId:string): string {
+        if(!connectedFlowId || !this.nmosState) return "";
+        if(connectedFlowId.startsWith("nmos_")){
+            let nmosId = connectedFlowId.substring(5);
+            let nmosSender:any = this.nmosState.senders?.[nmosId];
+            if(!nmosSender) return "";
+            let label = nmosSender.label || nmosId;
+            let nmosDev:any = this.nmosState.devices?.[nmosSender.device_id];
+            if(nmosDev?.label){
+                label = nmosDev.label + " / " + label;
+            }
+            return label;
+        }
+        return "";
+    }
+
+    // Detected-devices preview used by the Setup page (vendor profile table).
+    // Lists every NMOS node with the profile that matched (if any) and the
+    // resulting Web-UI URL.
+    private buildDetectedDevices(): Array<{ id:string, label:string, match:string, url:string }> {
+        let out:Array<{ id:string, label:string, match:string, url:string }> = [];
+        try{
+            let nodes:any = this.nmosState?.nodes || {};
+            let vendorProfiles:any[] = Array.isArray(this.settings?.vendorProfiles) ? this.settings.vendorProfiles : [];
+            for(let nodeId in nodes){
+                let n:any = nodes[nodeId];
+                if(!n) continue;
+                let label = n.label || nodeId;
+                let description = n.description || "";
+                let matchName = "";
+                for(let p of vendorProfiles){
+                    if(this.matchVendorProfile(p, label, description)){
+                        matchName = p.name || p.id;
+                        break;
+                    }
+                }
+                let url = this.buildDeviceUrl(nodeId);
+                out.push({ id: nodeId, label, match: matchName, url });
+            }
+            out.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+        }catch(e){}
+        return out;
+    }
+
+    private enrichCrosspointState(){
+        if(!this.crosspointState || !Array.isArray(this.crosspointState.devices)) return;
+
+        let totals:CrosspointTotals = {
+            devices:   { avail: 0, total: 0 },
+            senders:   { avail: 0, total: 0 },
+            receivers: { avail: 0, total: 0 }
+        };
+
+        // Pass 1: device-level NMOS metadata
+        // Compute the crosspoint device id that backs OUR virtual NMOS node
+        // (settings.virtualNode.deviceId) once — the worker prefixes NMOS
+        // device ids with "nmos_", so a match here means "every sender on
+        // this device is a virtual sender we registered ourselves".
+        let virtualDeviceCpId = "";
+        try{
+            if(this.settings?.virtualNode?.deviceId){
+                virtualDeviceCpId = "nmos_" + this.settings.virtualNode.deviceId;
+            }
+        }catch(e){}
+
+        let nodeLabelByDev:    { [devId:string]: string }  = {};
+        let isVirtualByDev:    { [devId:string]: boolean } = {};
+        for(let dev of this.crosspointState.devices){
+            let info = this.resolveDeviceNodeInfo(dev);
+            nodeLabelByDev[dev.id] = info.nodeLabel;
+            isVirtualByDev[dev.id] = !!virtualDeviceCpId && dev.id === virtualDeviceCpId;
+            let gm = this.buildGmidFromNode(info.nodeId);
+            let d = dev as CrosspointDevice;
+            d.nodeLabel  = info.nodeLabel;
+            d.gmid       = gm.gmid;
+            d.gmidLocked = gm.locked;
+            d.deviceUrl  = this.buildDeviceUrl(info.nodeId);
+            d.isVirtual  = isVirtualByDev[dev.id];
+        }
+
+        // Pass 2: sender legs + codec, build {flowId → enriched-sender-info}
+        let senderInfoById: { [id:string]: { legs:CrosspointFlowLeg[], codec:string, format:string, bitrate:CrosspointFlowBitrate, label:string } } = {};
+        for(let dev of this.crosspointState.devices){
+            let nodeLabel = nodeLabelByDev[dev.id] || "";
+            let devIsVirtual = isVirtualByDev[dev.id] === true;
+            for(let type of Object.keys(dev.senders || {})){
+                for(let s of (dev.senders as any)[type] || []){
+                    if(!s) continue;
+                    let nmosId = (typeof s.id === "string" && s.id.startsWith("nmos_")) ? s.id.substring(5) : "";
+                    let legs = nmosId ? this.buildLegsFromNmos(nmosId) : [];
+                    let codec = nmosId ? this.buildCodecFromManifest(nmosId) : "";
+                    if(!codec && s.capabilities?.mediaTypes){
+                        codec = this.mediaTypesToCodec(s.capabilities.mediaTypes);
+                    }
+                    let sf = s as CrosspointFlow;
+                    sf.legs = legs;
+                    sf.codec = codec;
+                    // Mark virtual-sender flows so the Details page can skip
+                    // the multicast / port edit and Forget controls — those
+                    // would either be rejected (IS-05 returns 405 on /staged
+                    // for virtual senders) or futile (the next re-register
+                    // brings the sender back).
+                    if(devIsVirtual) sf.isVirtual = true;
+
+                    senderInfoById[s.id] = {
+                        legs,
+                        codec,
+                        format:  s.format || "",
+                        bitrate: s.bitrate,
+                        label:   this.buildConnectedSenderLabel(s.id)
+                    };
+                }
+            }
+        }
+
+        // Pass 3: receivers + totals
+        for(let dev of this.crosspointState.devices){
+            if(dev.available) totals.devices.avail++;
+            totals.devices.total++;
+
+            for(let type of Object.keys(dev.senders || {})){
+                for(let s of (dev.senders as any)[type] || []){
+                    if(!s) continue;
+                    if(s.available) totals.senders.avail++;
+                    totals.senders.total++;
+                }
+            }
+
+            for(let type of Object.keys(dev.receivers || {})){
+                for(let r of (dev.receivers as any)[type] || []){
+                    if(!r) continue;
+                    let connected = r.connectedFlow ? senderInfoById[r.connectedFlow] : null;
+                    let f = r as CrosspointFlow;
+                    if(connected){
+                        f.legs    = connected.legs;
+                        f.codec   = connected.codec;
+                        f.format  = connected.format;
+                        f.bitrate = connected.bitrate;
+                        f.connectedSenderId    = r.connectedFlow;
+                        f.connectedSenderLabel = connected.label;
+                    }else{
+                        f.legs    = [];
+                        f.codec   = "";
+                        f.format  = "";
+                        f.bitrate = { v: 0, hint: "unknown" };
+                        f.connectedSenderId    = "";
+                        f.connectedSenderLabel = "";
+                    }
+                    if(r.available) totals.receivers.avail++;
+                    totals.receivers.total++;
+                }
+            }
+        }
+
+        (this.crosspointState as CrosspointState).totals = totals;
+        (this.crosspointState as CrosspointState).detectedDevices = this.buildDetectedDevices();
+    }
+
 }
 
 
@@ -895,6 +1246,13 @@ export interface CrosspointCapabilities {
 export interface CrosspointFlowBitrate {
     v:number,
     hint:string
+}
+
+export interface CrosspointFlowLeg {
+    index:number,
+    dstIp:string,
+    dstPort:string|number,
+    srcIp:string
 }
 
 
@@ -923,7 +1281,22 @@ export interface CrosspointFlow {
     // Optional: raw SDP shipped with virtual senders so the Details page
     // can show it without a manifest fetch (there is no real device to
     // fetch from).
-    sdp?:string
+    sdp?:string,
+
+    // Enrichment computed by CrosspointAbstraction.enrichCrosspointState.
+    // The UI consumes these directly instead of re-deriving them from the
+    // raw NMOS state.
+    legs?:CrosspointFlowLeg[],
+    codec?:string,
+    // Receiver-only: identity + display label of the currently-connected
+    // sender (mirrored from the sender side so the Details page can show
+    // "← <Device> / <Sender>" without a second lookup).
+    connectedSenderId?:string,
+    connectedSenderLabel?:string,
+    // True when this sender lives on our own virtual NMOS device. The
+    // Details page uses this to hide leg / multicast edit controls that
+    // would be rejected (IS-05 PATCH returns 405 on virtual senders).
+    isVirtual?:boolean
 };
 
 
@@ -960,10 +1333,27 @@ export interface CrosspointDevice {
         mqtt: CrosspointFlow[],
         unknown: CrosspointFlow[],
     },
-    
+
+    // Enrichment computed by CrosspointAbstraction.enrichCrosspointState.
+    // Optional so the worker thread, which constructs the bare device
+    // record, doesn't need to know about the post-enrichment fields.
+    nodeLabel?:string,
+    gmid?:string,
+    gmidLocked?:boolean,
+    deviceUrl?:string,
+    isVirtual?:boolean
   }
+export interface CrosspointTotals {
+    devices:   { avail:number, total:number },
+    senders:   { avail:number, total:number },
+    receivers: { avail:number, total:number }
+}
 export interface CrosspointState {
-    devices: CrosspointDevice[]
+    devices: CrosspointDevice[],
+    // Filled by enrichCrosspointState on the main thread. Optional because
+    // the worker emits a bare state without these fields.
+    totals?:CrosspointTotals,
+    detectedDevices?:Array<{ id:string, label:string, match:string, url:string }>
 }
 
 

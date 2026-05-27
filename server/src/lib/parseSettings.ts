@@ -156,44 +156,80 @@ export function parseSettings(settings:any){
 
 
     // ----- Virtual Senders -----
-    // Operator-defined senders that don't exist in any NMOS registry. Each
-    // entry stores a raw SDP that the user pasted on the Setup page. The
-    // sender shows up in the Crosspoint under a synthetic "Virtual Device"
-    // node and, when used as the source of a connection, the receiver gets
-    // PATCHed with this SDP as its transport_file — no IS-05 push on the
-    // sender side, since there is no sender side.
+    // Operator-defined senders that don't exist on any real NMOS device.
+    // Each entry stores a raw SDP that the user pasted on the Setup page.
+    // NMOS Crosspoint exposes itself as an IS-04 Node and registers every
+    // virtual sender as a regular NMOS sender (with its own source + flow)
+    // — so every NMOS-aware controller on the network sees them, not just
+    // this UI. Receivers PATCHed to a virtual sender therefore go through
+    // the standard sender_id resolution; there is no "virtual_" prefix
+    // anywhere in the runtime any more.
     //
-    // Schema: { id:string, name:string, sdp:string }
+    // Schema: { id, name, sdp, senderId, sourceId, flowId } per sender.
+    // The three UUIDs are minted once and kept across saves so receiver
+    // subscriptions stay valid over restarts.
+    let crypto:any;
+    try{ crypto = require("crypto"); }catch(e){}
+    let mkUuid = () => {
+        try{
+            if(crypto && typeof crypto.randomUUID === "function"){
+                return crypto.randomUUID();
+            }
+        }catch(e){}
+        // Fallback: simple-but-deterministic UUID-shaped random string.
+        // Good enough for an identifier; not cryptographically strong.
+        return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+            let r = Math.random() * 16 | 0;
+            let v = c === "x" ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    };
+    let uuidRe = /^[a-f0-9-]{36}$/i;
+
     if(!Array.isArray(settings.virtualSenders)){
         settings.virtualSenders = [];
     }else{
-        let crypto:any;
-        try{ crypto = require("crypto"); }catch(e){}
-        let mkUuid = () => {
-            try{
-                if(crypto && typeof crypto.randomUUID === "function"){
-                    return crypto.randomUUID();
-                }
-            }catch(e){}
-            // Fallback: simple-but-deterministic UUID-shaped random string.
-            // Good enough for an identifier; not cryptographically strong.
-            return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-                let r = Math.random() * 16 | 0;
-                let v = c === "x" ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-            });
-        };
         settings.virtualSenders = settings.virtualSenders
             .filter((v:any) => v && typeof v === "object")
             .map((v:any) => ({
                 id:        (typeof v.id === "string" && v.id) ? v.id : ("vs_" + Math.random().toString(36).slice(2,10)),
                 name:      (typeof v.name === "string") ? v.name : "",
                 sdp:       (typeof v.sdp === "string") ? v.sdp : "",
-                // Stable UUID published as `sender_id` on the receiver PATCH.
-                // Generated once and reused on every save so receivers stay
-                // bound to the same virtual sender across reloads.
-                senderId:  (typeof v.senderId === "string" && /^[a-f0-9-]{36}$/i.test(v.senderId)) ? v.senderId : mkUuid()
+                // Three stable UUIDs: published as sender_id / flow_id /
+                // source_id in the IS-04 records this server registers.
+                senderId:  (typeof v.senderId === "string" && uuidRe.test(v.senderId)) ? v.senderId : mkUuid(),
+                sourceId:  (typeof v.sourceId === "string" && uuidRe.test(v.sourceId)) ? v.sourceId : mkUuid(),
+                flowId:    (typeof v.flowId   === "string" && uuidRe.test(v.flowId))   ? v.flowId   : mkUuid()
             }));
+    }
+
+
+    // ----- Virtual NMOS Node identity -----
+    // The Node + Device records (one of each, shared by ALL virtual senders)
+    // we publish to the registry. UUIDs are persisted so the registry sees
+    // the same Node across restarts and doesn't accumulate orphans.
+    if(!settings.virtualNode || typeof settings.virtualNode !== "object"){
+        settings.virtualNode = {};
+    }
+    // Master switch — when false, NMOS Crosspoint does not register itself
+    // as an IS-04 Node and virtualSenders are inert. Default true for
+    // back-compat (existing installs keep working without touching settings).
+    if(typeof settings.virtualNode.enabled !== "boolean"){
+        settings.virtualNode.enabled = true;
+    }
+    if(typeof settings.virtualNode.nodeId !== "string" || !uuidRe.test(settings.virtualNode.nodeId)){
+        settings.virtualNode.nodeId = mkUuid();
+    }
+    if(typeof settings.virtualNode.deviceId !== "string" || !uuidRe.test(settings.virtualNode.deviceId)){
+        settings.virtualNode.deviceId = mkUuid();
+    }
+    if(typeof settings.virtualNode.label !== "string" || !settings.virtualNode.label){
+        settings.virtualNode.label = "NMOS Crosspoint Virtual Node";
+    }
+    // Optional override for the host/IP we advertise to the registry. When
+    // empty, NmosNodeRegistration auto-detects the first non-loopback IPv4.
+    if(typeof settings.virtualNode.advertiseHost !== "string"){
+        settings.virtualNode.advertiseHost = "";
     }
 
 
