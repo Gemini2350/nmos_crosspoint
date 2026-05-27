@@ -415,18 +415,24 @@
 
 
         if(src && dst){
-          let newList = [];
-          newList.push({
-            srcDev:srcDev,
-            src:src,
-            dstDev:dstDev,
-            dst:dst
-          })
-          cleanPreparedConnections(newList);
-          receivers = [... receivers]
-          if(autoTake){
-              takeConnect();
+          // Aktiver Punkt → Toggle Disconnect
+          if(dst.connectedFlow === src.id){
+            let idx = preparedConnectList.findIndex(c => !c.src && c.dst?.id === dst.id);
+            if(idx !== -1){ preparedConnectList.splice(idx, 1); preparedConnectList = preparedConnectList; }
+            else{
+              cleanPreparedConnections([{ srcDev: null, src: null, dstDev, dst }]);
+              if(autoTake) takeConnect();
             }
+            receivers = [...receivers]; updateGlobalTake(); return;
+          }
+          // Prepared Punkt → Toggle Unprepare
+          let idx = preparedConnectList.findIndex(c => c.src?.id === src.id && c.dst?.id === dst.id);
+          if(idx !== -1){ preparedConnectList.splice(idx, 1); preparedConnectList = preparedConnectList; }
+          else{
+            cleanPreparedConnections([{ srcDev, src, dstDev, dst }]);
+            if(autoTake) takeConnect();
+          }
+          receivers = [...receivers]; updateGlobalTake();
         }else{
           let srcString = getDevcieNameString(srcDev,src);
           let dstString = getDevcieNameString(dstDev,dst);
@@ -438,18 +444,20 @@
           }).then((response)=>{
             let newList = []
             response.data.connections.forEach((c)=>{
-              newList.push({
-                srcDev:c.srcDev,
-                src:c.src,
-                dstDev:c.dstDev,
-                dst:c.dst
-              })
+              newList.push({ srcDev: c.src ? c.srcDev : null, src: c.src || null, dstDev: c.dstDev, dst: c.dst })
             })
-            cleanPreparedConnections(newList);
-            receivers = [...receivers]
-            if(autoTake){
-              takeConnect();
+            let allPrepared = newList.length > 0 && newList.every(n =>
+              preparedConnectList.some(c => c.src?.id === n.src?.id && c.dst?.id === n.dst?.id)
+            );
+            if(allPrepared){
+              preparedConnectList = preparedConnectList.filter(c =>
+                !newList.some(n => c.src?.id === n.src?.id && c.dst?.id === n.dst?.id)
+              );
+            }else{
+              cleanPreparedConnections(newList);
+              if(autoTake) takeConnect();
             }
+            receivers = [...receivers]; updateGlobalTake();
           }).catch((e)=>{
             // TODO, error handling
             ServerConnector.addFeedback({
@@ -625,28 +633,19 @@
     function getDisconnectClass(dev:any,flow:any){
       for(let c of preparedConnectList){
         if(!c.src && c.dst){
-            if( flow.id == c.dst ){
-              return "prepareddisconnect"
-            }
+            if( flow.id == c.dst?.id ){ return "prepareddisconnect" }
         }
       }
-
       for(let c of workingConnectList){
         if(!c.src && c.dst){
-            if( flow.id == c.dst ){
-              return "workingdisconnect"
-            }
+            if( flow.id == c.dst?.id ){ return "workingdisconnect" }
         }
       }
-
       for(let c of previewConnectList){
         if(!c.src && c.dst){
-            if( flow.id == c.dst ){
-              return "previewdisconnect"
-            }
+            if( flow.id == c.dst?.id ){ return "previewdisconnect" }
         }
       }
-
       return false
     }
 
@@ -853,14 +852,14 @@
       <li>
         <label class="label cursor-pointer gap-2">
           <span class="label-text">Show unavailable</span> 
-          <input on:input={()=>changeFilter()} bind:checked={filter.showUnavailable} type="checkbox" class="toggle" />
+          <input on:input={()=>changeFilter()} bind:checked={filter.showUnavailable} type="checkbox" class="toggle toggle-info" />
         </label>
       </li>
 
       <li>
         <label class="label cursor-pointer gap-2">
           <span class="label-text">Show hidden</span>
-          <input on:input={()=>changeFilter()} bind:checked={filter.showHidden} type="checkbox" class="toggle" />
+          <input on:input={()=>changeFilter()} bind:checked={filter.showHidden} type="checkbox" class="toggle toggle-info" />
         </label>
       </li>
     </ul>

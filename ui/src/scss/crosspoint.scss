@@ -433,6 +433,8 @@ $cp-border: 1px solid transparent;
 
         .cp-connect-none, .cp-connect-device, .cp-connect-flow, .cp-connect-mismatch {
             div {
+                // GRID for dark design
+                box-shadow: inset -1px -1px 0 0 rgba(255,255,255,0.07);
                 width:$cp-sizePP;
                 height:$cp-sizePP;
                 position:relative;
@@ -684,7 +686,12 @@ html[data-theme="light"] {
                 }
             }
             
-
+            // GRID for light design 
+            .cp-connect-none, .cp-connect-device, .cp-connect-flow, .cp-connect-mismatch {
+                div {
+                    box-shadow: inset -1px -1px 0 0 rgba(0,0,0,0.08);
+                }
+            }
     
             .cp-connect-device {
                 span {
