@@ -307,7 +307,7 @@
         {/if}
         <li>
           <label><span>Autotake</span>
-            <input type="checkbox" class="toggle" bind:checked={autoTake} on:change={toggleAutotake} />
+            <input type="checkbox" class="toggle toggle-info" bind:checked={autoTake} on:change={toggleAutotake} />
           </label>
         </li>
         <li>
