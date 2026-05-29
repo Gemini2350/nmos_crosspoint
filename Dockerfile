@@ -52,8 +52,15 @@ RUN npm ci --omit=dev --no-audit --no-fund --prefer-offline \
 COPY --from=server-builder /build/server/dist  ./dist
 COPY --from=ui-builder     /build/server/public ./public
 
+# Default config shipped inside the image. The entrypoint copies these into
+# the (bind-mounted, possibly empty) ./config on first boot so a fresh host
+# starts without manual setup. Operator-edited config is never overwritten.
+COPY server/config.default ./config.default
+COPY server/docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
+
 # Settings + state come from volume mounts; create the directories so the
 # server doesn't error out on first boot when nothing is mounted yet.
 RUN mkdir -p ./config ./state ./log
 
-CMD ["node", "./dist/server.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

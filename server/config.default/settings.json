@@ -1,0 +1,15 @@
+{
+    "staticNmosRegistries":[
+        {"ip":"","port":80,"priority":10,"domain":""}
+    ],
+    "logFiles":"./log/",
+    "logOutput":true,
+    "server":{
+        "port":80,
+        "address":"0.0.0.0"
+    },
+    "nmos":{
+        "registryVersions":["v1.3","v1.2"],
+        "connectVersions":["v1.1","v1.0"]
+    }
+}

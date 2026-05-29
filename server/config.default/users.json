@@ -1,0 +1,19 @@
+{
+    "users":{
+        "admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","groups":["user","admin"]}
+    },
+    "permissions":{
+        "global":{
+            "allowRead":{"users":[],"groups":["user"]},
+            "allowWrite":{"users":[],"groups":["user"]},
+            "denyRead":{"users":[],"groups":[]},
+            "denyWrite":{"users":[],"groups":[]}
+        },
+        "public":{
+            "allowRead":{"users":["__noAuth"],"groups":["user"]},
+            "allowWrite":{"users":[],"groups":[]},
+            "denyRead":{"users":[],"groups":[]},
+            "denyWrite":{"users":[],"groups":[]}
+        }
+    }
+}
